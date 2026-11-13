@@ -22,7 +22,7 @@ library(patchwork)       # attached so the | and / layout operators work on a fr
 library(httr2)
 
 # ---- Settings ---------------------------------------------------------------
-OVERMAPS_VERSION <- "1.0.0"      # keep in step with DESCRIPTION, CITATION.cff, and the newest CHANGELOG.md section; a test checks all four
+OVERMAPS_VERSION <- "1.0.1"      # keep in step with DESCRIPTION, CITATION.cff, and the newest CHANGELOG.md section; a test checks all four
 max_radius_km <- 50         # the absolute largest radius; the slider offers only a range suited to the chosen place
 min_radius_km <- 0.5
 full_detail_km <- 6         # up to this radius every street is downloaded; beyond it the map keeps main streets only, so it stays fast
@@ -467,16 +467,27 @@ attempt_cap <- function(area_km2) min(60, max(25, 20 + 0.4 * area_km2))
 # Plain-language reason for a failure, from the error text we recorded. Returns a short phrase and a class.
 explain_failure <- function(msg) {
   m <- tolower(msg)
+  if (grepl("^status check failed", m)) {      # judge the cause under the check; only a slow or unreadable one is reported as a missed status check
+    inner <- explain_failure(sub("^status check failed: *", "", msg))
+    return(if (inner[1] %in% c("other", "slow")) c("slow", "it did not answer a quick status check") else inner)
+  }
   if (grepl("could not resolve|resolve host|name or service|getaddrinfo|nodename", m)) c("unreachable", "its address could not be looked up")
   else if (grepl("too many nodes|limit is 50000", m)) c("dense", "this area is too dense for OpenStreetMap's direct download")
   else if (grepl("status check", m)) c("slow", "it did not answer a quick status check")
   else if (grepl("no free query slot", m)) c("busy", "it had no free query slot")
   else if (grepl("status 429|status 406", m)) c("busy", "it is rate-limiting requests")
   else if (grepl("status 50[0-9]|could not finish", m)) c("busy", "it is overloaded")
-  else if (grepl("connection refused|failed to connect|couldn't connect|connection reset|ssl|tls|certificate|proxy|recv failure|send failure", m)) c("unreachable", "the connection was refused or interrupted")
+  else if (grepl("connection refused|failed to connect|could not connect|connect tunnel|couldn't connect|connection reset|ssl|tls|certificate|proxy|recv failure|send failure", m)) c("unreachable", "the connection was refused or interrupted")
   else if (grepl("timeout|timed out", m)) c("slow", "it did not answer in time")
   else if (grepl("status 4", m)) c("rejected", "it rejected the request")
   else c("other", "it failed")
+}
+# The whole text of an error, including the cause httr2 keeps in its parent (the part that says what curl actually reported).
+error_text <- function(e) {
+  parts <- conditionMessage(e)
+  p <- e$parent
+  while (!is.null(p) && inherits(p, "condition")) { m <- conditionMessage(p); if (!grepl(m, parts[1], fixed = TRUE)) parts <- c(parts, m); p <- p$parent }
+  trimws(gsub("\\s+", " ", paste(parts, collapse = " ")))
 }
 host_of <- function(url) sub("^https?://([^/]+).*$", "\\1", url)
 
@@ -485,7 +496,7 @@ host_of <- function(url) sub("^https?://([^/]+).*$", "\\1", url)
 overpass_ready <- function(url, check_s = 6) {
   resp <- tryCatch(request(sub("/interpreter$", "/status", url)) |> req_user_agent(overpass_ua) |> req_timeout(check_s) |>
                      req_error(is_error = function(r) FALSE) |> req_perform(), error = function(e) e)
-  if (inherits(resp, "error")) stop(sprintf("status check failed: %s", conditionMessage(resp)), call. = FALSE)
+  if (inherits(resp, "error")) stop(sprintf("status check failed: %s", error_text(resp)), call. = FALSE)
   if (resp_status(resp) != 200) return(invisible(TRUE))
   txt <- tryCatch(resp_body_string(resp), error = function(e) "")
   free <- regmatches(txt, regexec("([0-9]+) slots? available now", txt))[[1]]
@@ -553,7 +564,7 @@ overpass_download <- function(bb, area_km2 = 10, mirrors = overpass_mirrors, dea
     out <- tryCatch(getter(u, bb, cap), error = function(e) e)
     ok <- !inherits(out, "error")
     tries[[length(tries) + 1]] <- list(url = u, ok = ok, secs = as.numeric(difftime(clock(), t0, units = "secs")),
-                                       cap = cap, msg = if (ok) "" else conditionMessage(out))
+                                       cap = cap, msg = if (ok) "" else error_text(out))
     mark_mirror(u, ok, clock())
     if (ok) return(list(data = out, tries = tries))
   }
@@ -604,7 +615,10 @@ fetch_roads <- function(lon, lat, radius_m, crs_m, shape = NULL, on_try = NULL, 
   if (bb[["xmin"]] > bb[["xmax"]] || (bb[["xmax"]] - bb[["xmin"]]) > 5)
     stop(shiny::safeError("Places this close to the 180\u00b0 meridian are not supported yet."))
 
+  # Ancient sites are far from the regional servers, so the global ones are the only choice and get more time and one more pass.
+  patient <- identical(detail, "ancient")
   res <- overpass_download(bb, area_km2 = as.numeric(st_area(area)) / 1e6, mirrors = overpass_mirrors_for(bb), on_try = on_try,
+                          deadline_s = if (patient) 300 else 180, passes = if (patient) c(1, 2.2, 3.5) else c(1, 2.2),
                           getter = function(u, bb, cap) overpass_get(u, bb, cap, feature_values = detail_classes(detail)))
   if (is.null(res$data)) {
     msg <- download_failure_message(res$tries)
@@ -2089,6 +2103,21 @@ city_map <- function(d, style = "classic") {
                          "so they show the surviving remains and not a reconstruction of the whole ancient city"))
 }
 
+# A snapshot of the OpenStreetMap streets at each site, built once by data-raw/fetch_ancient_cities.R and kept in data/ancient_cities.rds.
+# A site found there is drawn at once with no download, which matters because the public servers are often busy and the global ones are the only
+# choice for most sites. A site missing from the file, or saved with another radius, is downloaded live as before.
+ancient_bundle <- function() {
+  if (!is.null(history_cache$cities)) return(history_cache$cities)
+  f <- history_file("ancient_cities.rds")
+  b <- if (is.null(f)) list() else tryCatch(readRDS(f), error = function(e) list())
+  history_cache$cities <- if (is.list(b)) b else list()
+  history_cache$cities
+}
+bundled_city <- function(site, radius_m) {
+  hit <- ancient_bundle()[[as.character(site$id)]]
+  if (is.list(hit) && is.list(hit$roads) && identical(as.integer(hit$radius_m), as.integer(radius_m))) hit else NULL
+}
+
 get_city_view <- function(x) { x <- as.character(x %||% "direction")[1]; if (!is.na(x) && x %in% names(city_views)) x else "direction" }
 history_title <- function(tab) if (identical(tab, "cities")) "Explore history: Streets of ancient cities" else "Explore history: The roads of the Roman Empire"
 history_modal <- function(style = "classic") {
@@ -2846,12 +2875,15 @@ server <- function(input, output, session) {
   observeEvent(input$c_draw, {
     s <- ancient_site(input$c_site); req(s)
     crs <- utm_epsg(s$lon, s$lat); radius_m <- round(s$radius_km * 1000)
-    roads <- tryCatch(withProgress(message = paste0("Getting the streets of ", s$name), value = 0.3,
+    saved <- bundled_city(s, radius_m)
+    roads <- if (!is.null(saved)) saved$roads else tryCatch(withProgress(message = paste0("Getting the streets of ", s$name), value = 0.3,
                         fetch_roads(s$lon, s$lat, radius_m, crs, NULL, detail = "ancient")),
                       error = function(e) { showNotification(conditionMessage(e), type = "error", duration = 12); NULL })
     if (is.null(roads)) { c_state(NULL); return() }
     lines <- prep_lines(roads, s$lon, s$lat, radius_m, crs)
-    c_state(list(site = s, lines = lines, crs = crs, got = city_coverage(lines)))
+    got <- city_coverage(lines)
+    if (!is.null(saved) && !is.null(lines)) got$text <- paste0(got$text, " The streets come from an OpenStreetMap snapshot taken ", saved$taken, ".")
+    c_state(list(site = s, lines = lines, crs = crs, got = got))
   })
   c_data <- reactive(c_state())
   c_ready <- reactive({ d <- c_data(); if (is.null(d) || is.null(d$lines)) NULL else d })
@@ -2859,7 +2891,7 @@ server <- function(input, output, session) {
   output$c_note <- renderUI({ s <- ancient_site(input$c_site); if (is.null(s)) return(NULL); p(class = "fine", paste0(s$civ, ". ", s$note)) })
   output$c_status <- renderUI({
     d <- c_data()
-    if (is.null(d)) return(div(class = "fine", role = "status", "Choose a city and press Draw map. The streets are downloaded from OpenStreetMap, which can take a little while."))
+    if (is.null(d)) return(div(class = "fine", role = "status", "Choose a city and press Draw map. Streets not already saved with the app are downloaded from OpenStreetMap, which can take a little while."))
     stale <- !identical(d$site$id, input$c_site)
     tagList(div(class = "fine", role = "status", d$got$text), if (stale) div(class = "fine", role = "status", paste0("This map shows ", d$site$name, ". Press Draw map to see ", ancient_site(input$c_site)$name, ".")))
   })

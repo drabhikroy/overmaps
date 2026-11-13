@@ -8,3 +8,15 @@ Sources:
 - Hotham, I. *By Road and by Sea*, travel times from Rome. CC BY 4.0.
 
 The geometry was simplified for display speed, so use the original Itiner-e release for measurement. The ancient city plans do not use this file. They are downloaded from OpenStreetMap when requested.
+
+## Ancient city snapshot
+
+`ancient_cities.rds`, when present, holds the OpenStreetMap streets, paths, and tracks for each site on the Ancient cities tab, so those maps draw at once and do not wait on the public Overpass servers. Each entry records the site, the radius, and the date the snapshot was taken. Build or refresh it from the project root:
+
+```sh
+Rscript data-raw/fetch_ancient_cities.R
+```
+
+The script skips sites already saved, so run it again to fill in any that failed. Add `--refresh` to download every site anew. Without the file, the app downloads a site when you press Draw map.
+
+The streets are copyright OpenStreetMap contributors and available under the Open Database License (<https://www.openstreetmap.org/copyright>).

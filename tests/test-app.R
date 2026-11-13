@@ -2767,6 +2767,41 @@ test_that("R18h a failed or empty ancient city download says so and draws nothin
   cap <- env$city_map(d, "classic")$patches$annotation$caption; cap <- paste(cap, collapse = " "); expect_match(cap, "not a reconstruction"); expect_match(cap, "Data \u00a9 OpenStreetMap contributors")
 })
 
+test_that("R19a an ancient city saved with the app is drawn with no download, says when the snapshot was taken, and a different radius is downloaded live", {
+  withr::defer({ env$ancient_sites <- orig_sites; env$history_cache$cities <- NULL }); orig_sites <- env$ancient_sites
+  env$ancient_sites <- dplyr::bind_rows(orig_sites, tibble(id = "test", name = "Testville, Elkins", civ = "Roman", lat = lat0, lon = lon0, radius_km = 1.5, note = "A fixture."))
+  env$history_cache$cities <- list(test = list(roads = fixture_roads(), taken = "November 13, 2026", radius_m = 1500L))
+  calls <- with_stubs(NULL); out <- list()
+  testServer(env$server, { session$setInputs(history_open = 1, h_tab = "cities", c_site = "test", c_draw = 1); session$flushReact()
+    out$has <<- output$c_has_map; out$status <<- as.character(output$c_status$html) })
+  expect_length(calls$fetch, 0); expect_equal(out$has, "yes"); expect_match(out$status, "snapshot taken November 13, 2026")
+  env$history_cache$cities <- list(test = list(roads = fixture_roads(), taken = "November 13, 2026", radius_m = 900L))
+  calls <- with_stubs(NULL)
+  testServer(env$server, { session$setInputs(history_open = 1, h_tab = "cities", c_site = "test", c_draw = 1); session$flushReact(); out$status2 <<- as.character(output$c_status$html) })
+  expect_length(calls$fetch, 1); expect_false(grepl("snapshot", out$status2))
+})
+test_that("R19b a status check that failed for a real reason is reported with that reason, and the fetch script and a missing bundle are handled", {
+  expect_equal(env$explain_failure("status check failed: Timeout was reached")[1], "slow")
+  expect_match(env$explain_failure("status check failed: Timeout was reached")[2], "quick status check")
+  expect_equal(env$explain_failure("status check failed: Failed to connect to host: Connection refused")[1], "unreachable")
+  expect_equal(env$explain_failure("status check failed: Could not resolve host: example.org")[1], "unreachable")
+  expect_equal(env$explain_failure("status check failed: something odd")[1], "slow")
+  env$history_cache$cities <- NULL; withr::defer(env$history_cache$cities <- NULL)
+  withr::local_envvar(OVERMAPS_DATA = file.path(tempdir(), "no_such_data_folder"))
+  expect_length(env$ancient_bundle(), 0); expect_null(env$bundled_city(list(id = "pompeii"), 800))
+  script <- readLines(file.path(dirname(normalizePath(app_file)), "data-raw", "fetch_ancient_cities.R"), warn = FALSE)
+  expect_true(any(grepl("ancient_cities.rds", script, fixed = TRUE))); expect_no_error(parse(text = script))
+})
+
+test_that("R19c the full text of a failed request keeps the cause curl reported, once, and a refused connection is classed as unreachable", {
+  parent <- structure(class = c("error", "condition"), list(message = "Could not connect to server", call = NULL))
+  e <- structure(class = c("rlang_error", "error", "condition"), list(message = "Failed to perform HTTP request.", call = NULL, parent = parent))
+  txt <- env$error_text(e)
+  expect_match(txt, "Failed to perform HTTP request", fixed = TRUE)
+  expect_equal(lengths(regmatches(txt, gregexpr("Could not connect to server", txt))), 1L)
+  expect_equal(env$explain_failure(paste("status check failed:", txt))[1], "unreachable")
+})
+
 # ---- Release: version, copy, and writing gates ---------------------------------------------------------------------------------
 root_dir <- dirname(normalizePath(app_file))
 read_root <- function(f) paste(readLines(file.path(root_dir, f), warn = FALSE, encoding = "UTF-8"), collapse = "\n")
@@ -2797,7 +2832,7 @@ test_that("REL3 the privacy copy names every service that receives typed text", 
 })
 
 test_that("REL4 the documents follow the writing rules: no em or en dashes, no contractions, none of the banned words", {
-  docs <- c("README.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "RELEASE_TEMPLATE.md", "data/README.md")
+  docs <- c("README.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "RELEASE_TEMPLATE.md", "data/README.md", "data-raw/fetch_ancient_cities.R")
   contraction <- "\\b[A-Za-z]+n't\\b|\\b(it|that|there|here|he|she|what|let|who|where)'s\\b|\\b(I|you|we|they)'(m|re|ve|ll|d)\\b"
   banned <- "\\b(actionable|robust|ensure[sd]?|leverag(e|es|ed|ing)|utiliz(e|es|ed|ing)|enhanc(e|es|ed|ing|ement)|seamless(ly)?)\\b"
   for (f in docs) {
@@ -2807,6 +2842,17 @@ test_that("REL4 the documents follow the writing rules: no em or en dashes, no c
     expect_false(grepl(banned, txt, ignore.case = TRUE, perl = TRUE), info = paste(f, "uses a banned word"))
   }
   expect_false(grepl("—|–", read_root("app.R")), info = "app.R has an em or en dash")
+})
+
+test_that("REL6 every image the README shows is in the repository and has alt text", {
+  md <- read_root("README.md")
+  imgs <- regmatches(md, gregexpr('(!\\[[^]]*\\]\\(docs/[^)]+\\))|(<img src="docs/[^"]+"[^>]*>)', md))[[1]]
+  expect_gte(length(imgs), 4)
+  for (i in imgs) {
+    path <- sub('.*(docs/[^)" ]+).*', "\\1", i)
+    expect_true(file.exists(file.path(root_dir, path)), info = path)
+    expect_false(grepl("^!\\[\\]|alt=\"\"", i), info = paste("no alt text:", path))
+  }
 })
 
 test_that("REL5 the documents state the real counts of ancient sites and civilizations", {

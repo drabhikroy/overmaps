@@ -1,6 +1,6 @@
 Package: overmaps
 Title: Geek out on streets
-Version: 1.0.0
+Version: 1.0.1
 Authors@R: person("Abhik", "Roy", role = c("aut", "cre", "cph"))
 Description: A local Shiny application that maps the street network of any
     place and downloads the result as a print-ready file. It also maps the

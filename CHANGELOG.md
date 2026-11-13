@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1
+
+- Ancient cities draw at once from a saved snapshot of OpenStreetMap streets when one ships with the app. `data-raw/fetch_ancient_cities.R` builds or refreshes the snapshot, and any site not in it is still downloaded when you press Draw map.
+- Sites outside Europe and North America get more time and an extra pass when the public servers are busy.
+- A failed server request now reports what actually went wrong, instead of a generic message.
+- The README shows the Classic, Dusk, and Mono looks and the Explore history window.
+
 ## 1.0.0
 
 First public release of Overmaps: Geek out on streets.
@@ -17,7 +24,7 @@ First public release of Overmaps: Geek out on streets.
 ### Explore history
 
 - The roads of the Roman Empire from the Itiner-e network, by region, as main and secondary roads, strength of the evidence, steepness, or days of travel from Rome on foot, by cart, or by courier.
-- Street plans of fifteen ancient cities across 11 civilizations: Roman, Greek and Roman, Greek, Minoan, Nabataean, Palmyrene, Indus Valley, Khmer, Teotihuacan, Maya, and Inca. Each plan reports how many streets OpenStreetMap holds for the site.
+- Street plans of fifteen ancient cities across 11 civilizations: Roman, Greek and Roman, Greek, Minoan, Nabataean, Palmyrene, Indus Valley, Khmer, Teotihuacan, Maya, and Inca. Each plan reports how many streets OpenStreetMap holds for the site, and a saved snapshot of the streets can ship with the app so the plans draw at once.
 - A full screen option, with a sidebar that starts at a normal width and can be widened, as on the main page.
 - The same "Choose a look" picker as the main map.
 
