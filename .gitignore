@@ -1,0 +1,12 @@
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+renv/library/
+renv/staging/
+Rplots.pdf
+roads_cache/
+tests/shots/
+tests/*.log
+.DS_Store

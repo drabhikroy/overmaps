@@ -1,0 +1,41 @@
+Package: overmaps
+Title: Geek out on streets
+Version: 1.0.0
+Authors@R: person("Abhik", "Roy", role = c("aut", "cre", "cph"))
+Description: A local Shiny application that maps the street network of any
+    place and downloads the result as a print-ready file. It also maps the
+    roads of the Roman Empire and the street plans of fifteen ancient cities.
+License: PolyForm-Noncommercial-1.0.0
+Encoding: UTF-8
+URL: https://github.com/drabhikroy/overmaps
+BugReports: https://github.com/drabhikroy/overmaps/issues
+Depends:
+    R (>= 4.1)
+Imports:
+    shiny,
+    bslib,
+    sf,
+    osmdata,
+    dplyr,
+    tidyr,
+    purrr,
+    tibble,
+    stringr,
+    ggplot2,
+    ggtext,
+    showtext,
+    sysfonts,
+    glue,
+    patchwork,
+    httr2,
+    ragg,
+    jsonlite,
+    stringi,
+    rlang
+Suggests:
+    testthat (>= 3.0.0),
+    withr,
+    xml2,
+    base64enc,
+    commonmark,
+    png
