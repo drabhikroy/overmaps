@@ -293,6 +293,7 @@ test_that("I1 fetch_roads serves a cached result without network", {
 })
 test_that("I1c geocode failure path: unreachable service errors (caught by the app) rather than hanging", {
   skip_if(Sys.getenv("QA_ONLINE") == "1", "online run")
+  skip_on_ci()   # a hosted runner has internet access, so the services are reachable there
   t0 <- Sys.time(); expect_error(env$geocode("Elkins")); expect_lt(as.numeric(difftime(Sys.time(), t0, units = "secs")), 25)
 })
 

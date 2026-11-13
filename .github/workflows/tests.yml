@@ -30,5 +30,9 @@ jobs:
             any::png
           needs: check
 
+      - name: Report graphics devices
+        run: |
+          Rscript -e 'print(R.version.string); print(capabilities()); print(packageVersion("ragg")); for (k in c("png","pdf","svg")) { f <- tempfile(fileext = paste0(".", k)); switch(k, png = ragg::agg_png(f, width = 4, height = 4, units = "in", res = 72), pdf = grDevices::cairo_pdf(f, width = 4, height = 4), svg = grDevices::svg(f, width = 4, height = 4)); cat(k, "device:", dev.cur(), "\n"); plot(1); dev.off(); cat(k, "bytes:", file.size(f), "\n") }'
+
       - name: Run the suite
         run: Rscript tests/run_tests.R
