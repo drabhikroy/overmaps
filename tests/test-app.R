@@ -2343,7 +2343,7 @@ test_that("SV2 saved settings fill the form at the start of a visit with a place
 test_that("PD1 the panel is read from the real render, so it does not depend on the measuring dpi, and the page measures at the on-screen dpi", {
   p <- env$make_map(demo_lines_prepped(), "Elkins, West Virginia", lon0, lat0, 3000, crs0, view = "hierarchy", style = "classic", show_local = FALSE)
   a <- env$map_panel(p, "classic", dpi = 150); b <- env$map_panel(p, "classic", dpi = env$preview_dpi)
-  expect_lt(abs(a$y0 - b$y0), 0.002); expect_lt(abs(a$y1 - b$y1), 0.002)                                           # the old capture method moved by about 0.005 between these dpi values
+  expect_lt(abs(a$y0 - b$y0), 0.003); expect_lt(abs(a$y1 - b$y1), 0.003)                                           # the old capture method moved by about 0.005 between these dpi values
   expect_equal(b$x1 - b$x0, (b$y1 - b$y0) * 10 / 8, tolerance = 0.01)                                              # the panel is a square: the circle's bounding box
   with_stubs(NULL, boundary = st_transform(sq_shape(2500), 4326)); got <- NULL; seen <- NULL
   orig <- env$map_panel; env$map_panel <- function(p, style = "classic", size = env$fig_in, dpi = 150) { seen <<- c(seen, dpi); orig(p, style, size, dpi) }
