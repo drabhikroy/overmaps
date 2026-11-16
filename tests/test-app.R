@@ -2875,18 +2875,37 @@ test_that("RL1 relief is a switch on the density map: flat by default, spikes on
   expect_equal(layer_geoms(h1), layer_geoms(h2)); expect_false(has_spikes(h2))
 })
 
-test_that("RL2 spike heights rise faster than density on one fixed scale, stop at the cap, and are drawn back to front", {
+test_that("RL2 spike heights rise faster than density on one fixed scale, stop at the cap, and are drawn from the north down", {
   spike_cells <- function(x, y, d) sf::st_sf(dens = d, cls = factor(rep("a", length(d)), levels = "a"), geometry = sf::st_sfc(Map(function(a, b) sf::st_point(c(a, b)), x, y), crs = crs0))
   d <- c(5, 12.5, 25, 60)
-  sp <- env$relief_spikes(spike_cells(c(0, 1000, 2000, 3000), rep(0, 4), d), 800, c(0, 0), 0.6, 3000)
+  sp <- env$relief_spikes(spike_cells(c(0, 1000, 2000, 3000), rep(0, 4), d), 800, 3000)
   apex <- sp$polys$y[seq(1, nrow(sp$polys), by = 6)][order(sp$polys$x[seq(1, nrow(sp$polys), by = 6)])]
   expect_equal(apex, pmin(d / 25, 1.2)^1.5 * 0.3 * 3000)                     # the reference density reaches 0.3 of the radius; 60 is held at 1.2 times the reference
   expect_gt(apex[3] / apex[2], 2)                                              # doubling the density more than doubles the height
   expect_equal(sp$cap, 30)
-  near_far <- env$relief_spikes(spike_cells(c(0, 0), c(-1000, 1000), c(10, 10)), 800, c(0, 0), 0.6, 3000)
-  expect_gt(mean(near_far$polys$y[near_far$polys$id == 1]), mean(near_far$polys$y[near_far$polys$id == 3]))   # the northern, farther spike comes first
+  near_far <- env$relief_spikes(spike_cells(c(0, 0), c(-1000, 1000), c(10, 10)), 800, 3000)
+  expect_gt(mean(near_far$polys$y[near_far$polys$id == 1]), mean(near_far$polys$y[near_far$polys$id == 3]))   # the northern spike comes first
   env$unit_env$u <- "mi"; withr::defer(env$unit_env$u <- "km")
-  expect_equal(env$relief_spikes(spike_cells(0, 0, 10), 800, c(0, 0), 0.6, 3000)$cap, 30 * env$km_per_mile)
+  expect_equal(env$relief_spikes(spike_cells(0, 0, 10), 800, 3000)$cap, 30 * env$km_per_mile)
+})
+
+test_that("RL2b hexagons outside the city limit are faded whole, spike and ground together", {
+  lines <- demo_lines_prepped()
+  ctr <- sf::st_coordinates(env$center_of(lon0, lat0, crs0))
+  west <- sf::st_buffer(sf::st_sfc(sf::st_point(c(ctr[1] - 1500, ctr[2])), crs = crs0), 1800)
+  p <- env$make_map(lines, "Test", lon0, lat0, 3000, crs0, view = "density", relief = TRUE, inside = west)
+  sp <- Filter(function(l) is.data.frame(l$data) && "face" %in% names(l$data), p[[1]]$layers)[[1]]$data
+  out <- grepl("(outside)", sp$face, fixed = TRUE)
+  expect_true(any(out)); expect_true(any(!out))                                # some hexagons are inside the limit and some are not
+  for (i in unique(sp$id[out])) expect_true(all(grepl("(outside)", sp$face[sp$id == i], fixed = TRUE)))
+  geoms <- p[[1]]$layers
+  dash <- which(vapply(geoms, function(l) identical(l$aes_params$linetype, "22"), TRUE))
+  spike <- which(vapply(geoms, function(l) is.data.frame(l$data) && "face" %in% names(l$data), TRUE))
+  expect_length(dash, 1); expect_lt(dash, spike)                              # the city limit is drawn under the spikes
+  flat <- env$make_map(lines, "Test", lon0, lat0, 3000, crs0, view = "density", inside = west)[[1]]$layers
+  expect_equal(unname(which(vapply(flat, function(l) identical(l$aes_params$linetype, "22"), TRUE))), max(which(vapply(flat, function(l) inherits(l$geom, "GeomSf"), TRUE))))   # on the flat map it stays the top map layer
+  none <- env$make_map(lines, "Test", lon0, lat0, 3000, crs0, view = "density", relief = TRUE)
+  expect_false(any(grepl("(outside)", Filter(function(l) is.data.frame(l$data) && "face" %in% names(l$data), none[[1]]$layers)[[1]]$data$face, fixed = TRUE)))
 })
 
 test_that("RL3 the relief switch travels in a share link, and anything but 0 or 1 is ignored", {
