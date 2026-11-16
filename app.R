@@ -882,8 +882,8 @@ dens_labels_mi <- c("under 3", "3\u20138", "8\u201316", "16\u201324", "24\u20133
 dens_scheme <- function() if (identical(unit_env$u, "mi")) list(breaks = dens_breaks_mi, labels = dens_labels_mi) else list(breaks = dens_breaks, labels = dens_labels)
 
 # Pointy-top hexagons laid over the map; every street segment is assigned to the hexagon holding its midpoint.
-hex_density <- function(segs, radius_m, center_m, shape = NULL) {
-  cxy <- as.numeric(st_coordinates(center_m)); s <- radius_m / 11       # s = center-to-corner distance
+hex_density <- function(segs, radius_m, center_m, shape = NULL, across = 11) {
+  cxy <- as.numeric(st_coordinates(center_m)); s <- radius_m / across   # s = center-to-corner distance; "across" hexagons fit in a radius
   x <- segs$mx - cxy[1]; y <- segs$my - cxy[2]
   q <- (sqrt(3) / 3 * x - y / 3) / s; r <- (2 / 3 * y) / s; z <- -q - r  # axial -> cube coordinates, then round to the nearest hexagon
   rq <- round(q); rr <- round(r); rz <- round(z)
@@ -966,9 +966,9 @@ net_tiles <- function(net) {
 center_of <- function(lon, lat, crs_m) st_transform(st_sfc(st_point(c(lon, lat)), crs = 4326), crs_m)
 
 # Everything a map type needs to know about the streets: the numbers for its subtitle, tiles, and legend.
-view_data <- function(view, lines, radius_m, center_m, shape = NULL, detail = "all", center_txt = NULL, units = "km", net = NULL, paths = NULL) {
+view_data <- function(view, lines, radius_m, center_m, shape = NULL, detail = "all", center_txt = NULL, units = "km", net = NULL, paths = NULL, fine = FALSE) {
   old_u <- unit_env$u; unit_env$u <- as_unit(units); on.exit(unit_env$u <- old_u, add = TRUE)
-  vd <- view_data_core(view, lines, radius_m, center_m, shape, center_txt, paths)
+  vd <- view_data_core(view, lines, radius_m, center_m, shape, center_txt, paths, fine)
   vd$net_tiles <- net_tiles(net)
   if (identical(detail, "all")) return(vd)
   note <- if (identical(detail, "main")) "Local streets (residential and unclassified) are not included at this size, to keep the map fast."
@@ -981,7 +981,7 @@ view_data <- function(view, lines, radius_m, center_m, shape = NULL, detail = "a
   } else vd$subtitle <- paste(vd$subtitle, note)
   vd
 }
-view_data_core <- function(view, lines, radius_m, center_m, shape = NULL, center_txt = NULL, paths = NULL) {
+view_data_core <- function(view, lines, radius_m, center_m, shape = NULL, center_txt = NULL, paths = NULL, fine = FALSE) {
   view <- get_view(view); r <- radius_txt(radius_m)
   where <- if (is.null(shape)) paste0("within ", r, " ", ulab(), " of ", center_txt %||% "the center") else "inside the city limits"   # used in subtitles and tiles
   edge <- if (is.null(shape)) "ring" else "boundary"
@@ -1070,7 +1070,7 @@ view_data_core <- function(view, lines, radius_m, center_m, shape = NULL, center
 
   # density
   segs <- segments_of(lines)
-  hx <- hex_density(segs, radius_m, center_m, shape)
+  hx <- hex_density(segs, radius_m, center_m, shape, across = if (isTRUE(fine)) relief_across else 11)
   cells <- hx$cells; d <- cells$dens * uf()                 # miles per square mile is 1.609 times kilometers per square kilometer
   ds <- dens_scheme()
   # Fixed classes in round numbers, the same for every place, so two maps can be compared and each legend entry means something.
@@ -1091,6 +1091,30 @@ view_data_core <- function(view, lines, radius_m, center_m, shape = NULL, center
 # Totals by road role, used by the hierarchy subtitle and tiles.
 # (road_stats is defined above.)
 
+# Relief helpers. Heights are proportional to street density on one fixed scale, so two places can be compared, and are capped so a single
+# extreme hexagon cannot flatten the rest.
+relief_tilt <- 0.62         # how much the ground is squeezed vertically
+relief_across <- 26         # hexagons across a radius when raised; the flat map uses 11, and the finer grid is what makes thin peaks
+relief_ref_km <- 25         # km of street per square kilometer that reaches the reference height
+relief_cap <- 1.2           # heights stop growing at this multiple of the reference
+relief_power <- 1.5         # heights grow faster than density, so moderate areas stay low and dense cores stand out
+relief_height <- 0.3        # height at the reference density, as a share of the map radius
+relief_dark <- " (shaded)"  # suffix for the darker right face of each spike
+shade_color <- function(col, f) { m <- grDevices::col2rgb(col)[, 1] * f; grDevices::rgb(m[1], m[2], m[3], maxColorValue = 255) }
+relief_spikes <- function(cells, hex_w, cxy, ky, radius_m) {
+  ref <- relief_ref_km * uf()                                                # the reference density in the unit on screen (cells$dens is already in that unit)
+  cen <- suppressWarnings(st_coordinates(st_centroid(st_geometry(cells))))
+  cx <- cen[, 1]; cy <- cxy[2] + (cen[, 2] - cxy[2]) * ky
+  h <- pmin(cells$dens / ref, relief_cap)^relief_power * relief_height * radius_m
+  w <- 0.4 * hex_w
+  ord <- order(cy, decreasing = TRUE)                                         # farthest first, so nearer spikes cover them
+  polys <- do.call(rbind, lapply(seq_along(ord), function(k) {
+    i <- ord[k]; cl <- as.character(cells$cls[i])
+    data.frame(x = c(cx[i], cx[i] - w, cx[i], cx[i], cx[i], cx[i] + w), y = c(cy[i] + h[i], cy[i], cy[i] - w * ky, cy[i] + h[i], cy[i] - w * ky, cy[i]),
+               id = rep(c(2 * k - 1, 2 * k), each = 3), face = rep(c(cl, paste0(cl, relief_dark)), each = 3))
+  }))
+  list(polys = polys, cap = relief_cap * ref)
+}
 draw_roles <- function(lines, pal) {
   role_lw <- setNames(roles$lw, roles$role)
   map(rev(roles$role), function(r) {
@@ -1110,30 +1134,38 @@ nice_length <- function(target) {
 }
 # Scale bar (bottom left) and north arrow (top right), set in the empty corners of the square the circle sits in, so they never touch a street.
 # Every map is drawn with north up, so the arrow is fixed. The bar is in the unit the person chose.
-map_furniture <- function(center_m, radius_m, pal) {
+map_furniture <- function(center_m, radius_m, pal, ky = 1) {
   cc <- as.numeric(sf::st_coordinates(center_m)[1, 1:2]); R <- radius_m
   u_len <- nice_length(0.3 * R / 1000 / uf()); if (is.na(u_len)) return(NULL)
-  len_m <- u_len * uf() * 1000; x0 <- cc[1] - 0.95 * R; y0 <- cc[2] - 0.93 * R; tick <- 0.02 * R
+  len_m <- u_len * uf() * 1000; x0 <- cc[1] - 0.95 * R; y0 <- cc[2] - 0.93 * R * ky; tick <- 0.02 * R
   lab <- paste(format(u_len, big.mark = ",", scientific = FALSE), ulab())
-  ax <- cc[1] + 0.84 * R; ay <- cc[2] + 0.72 * R; hw <- 0.045 * R
+  ax <- cc[1] + 0.84 * R; ay <- cc[2] + 0.72 * R * ky; hw <- 0.045 * R
   list(annotate("segment", x = x0, xend = x0 + len_m, y = y0, yend = y0, color = pal$ink, linewidth = 0.7, lineend = "butt"),
        annotate("segment", x = c(x0, x0 + len_m), xend = c(x0, x0 + len_m), y = y0 - tick, yend = y0 + tick, color = pal$ink, linewidth = 0.7, lineend = "butt"),
        annotate("text", x = x0, y = y0 + 2.2 * tick, label = lab, hjust = 0, vjust = 0, size = label_mm * 1.05, color = pal$ink, family = body_font),
        annotate("polygon", x = c(ax, ax + hw, ax, ax - hw), y = c(ay + 0.16 * R, ay, ay + 0.055 * R, ay), fill = pal$ink, color = pal$ink, linewidth = 0.2),
        annotate("text", x = ax, y = ay + 0.185 * R, label = "N", hjust = 0.5, vjust = 0, size = label_mm * 1.05, color = pal$ink, family = body_font))
 }
-make_map <- function(lines, place, lon, lat, radius_m, crs_m, label_roads = TRUE, style = "classic", view = "hierarchy", show_local = TRUE, shape = NULL, inside = NULL, detail = "all", center_txt = NULL, units = "km", paths = NULL, note = NULL) {
+make_map <- function(lines, place, lon, lat, radius_m, crs_m, label_roads = TRUE, style = "classic", view = "hierarchy", show_local = TRUE, shape = NULL, inside = NULL, detail = "all", center_txt = NULL, units = "km", paths = NULL, note = NULL, relief = FALSE) {
   old_u <- unit_env$u; unit_env$u <- as_unit(units); on.exit(unit_env$u <- old_u, add = TRUE)
   pal <- get_style(style); view <- get_view(view)
   center_m <- center_of(lon, lat, crs_m)
   circle <- if (is.null(shape)) st_buffer(center_m, radius_m) else shape
-  vd <- view_data(view, lines, radius_m, center_m, shape, detail, center_txt, unit_env$u, paths = paths)
+  # Relief: the street-density hexagons are raised into spikes, seen from a slant. The ground is squeezed vertically by ky and every flat layer follows it.
+  rel <- identical(view, "density") && isTRUE(relief); ky <- if (rel) relief_tilt else 1
+  cxy <- as.numeric(st_coordinates(center_m))[1:2]
+  tilt <- function(g) {
+    if (!rel) return(g)
+    crs <- st_crs(g); out <- (st_geometry(g) - cxy) * matrix(c(1, 0, 0, ky), 2) + cxy
+    st_set_crs(out, crs)
+  }
+  vd <- view_data(view, lines, radius_m, center_m, shape, detail, center_txt, unit_env$u, paths = paths, fine = rel)
   hide_local <- view == "hierarchy" && !isTRUE(show_local)   # only the drawing changes; the numbers and legend totals still count every street
   drawn <- if (hide_local) filter(lines, role != roles$role[5]) else lines
   legend_theme <- theme(legend.position = "bottom", legend.text = element_text(size = 11, color = pal$muted, margin = margin(l = 3, r = 6)),
                         legend.title = element_text(size = 11, color = pal$muted),
                         legend.key.width = unit(1.0, "cm"), legend.key.height = unit(0.5, "cm"), legend.margin = margin(14, 0, 0, 0), legend.box.margin = margin(0, 0, 0, 0))
-  base <- ggplot() + geom_sf(data = circle, fill = pal$plate, color = pal$ring, linewidth = 0.6)
+  base <- ggplot() + geom_sf(data = tilt(circle), fill = pal$plate, color = pal$ring, linewidth = 0.6)
   # Circle with the city outlined: everything outside the boundary is veiled with the paper color, so it stays
   # visible as context but recedes. The veil goes on top of the streets, labels, and hexagons, and the ring is redrawn over it.
   veil <- NULL; dimmed <- FALSE   # dimmed: something outside the city is actually veiled (not so when the city covers the whole circle)
@@ -1141,16 +1173,16 @@ make_map <- function(lines, place, lon, lat, radius_m, crs_m, label_roads = TRUE
     inside_c <- tryCatch(suppressWarnings(st_intersection(st_make_valid(inside), circle)), error = function(e) NULL)
     outside <- tryCatch(suppressWarnings(st_difference(circle, st_make_valid(inside))), error = function(e) NULL)
     if (!is.null(inside_c) && length(inside_c) > 0 && !all(st_is_empty(inside_c))) {
-      dimmed <- !is.null(outside) && length(outside) > 0 && !all(st_is_empty(outside))
+      dimmed <- !rel && !is.null(outside) && length(outside) > 0 && !all(st_is_empty(outside))
       veil <- list(
-        if (dimmed) geom_sf(data = outside, fill = pal$plate, alpha = if (view %in% c("direction", "density")) 0.84 else 0.74, color = NA),
-        geom_sf(data = circle, fill = NA, color = pal$ring, linewidth = 0.6),
-        geom_sf(data = inside_c, fill = NA, color = pal$muted, linewidth = 0.45, linetype = "22"))
+        if (dimmed) geom_sf(data = tilt(outside), fill = pal$plate, alpha = if (view %in% c("direction", "density")) 0.84 else 0.74, color = NA),
+        geom_sf(data = tilt(circle), fill = NA, color = pal$ring, linewidth = 0.6),
+        geom_sf(data = tilt(inside_c), fill = NA, color = pal$muted, linewidth = 0.45, linetype = "22"))
     }
   }
   # When the map is centered on an address, a small ring marks it.
   marker <- if (!is.null(center_txt)) geom_sf(data = center_m, shape = 21, size = 3.4, stroke = 1.2, fill = pal$plate, color = pal$ink)
-  frame <- list(veil, marker, map_furniture(center_m, radius_m, pal), coord_sf(crs = crs_m, datum = NA, expand = FALSE), theme_void(base_family = body_font), legend_theme)
+  frame <- list(veil, marker, map_furniture(center_m, radius_m, pal, ky), coord_sf(crs = crs_m, datum = NA, expand = FALSE), theme_void(base_family = body_font), legend_theme)
   extra <- NULL
 
   if (view == "hierarchy") {
@@ -1244,9 +1276,19 @@ make_map <- function(lines, place, lon, lat, radius_m, crs_m, label_roads = TRUE
     cxy <- as.numeric(st_coordinates(center_m))
     keys <- st_sf(cls = factor(vd$levels, levels = vd$levels),
                   geometry = st_sfc(rep(list(st_polygon(list(cbind(cxy[1] + c(0, 1, 1, 0, 0), cxy[2] + c(0, 0, 1, 1, 0))))), length(vd$levels)), crs = st_crs(center_m)))
-    map_plot <- base + geom_sf(data = cells, aes(fill = cls), color = pal$plate, linewidth = 0.4) +
-      geom_sf(data = keys, aes(fill = cls), alpha = 0, color = NA, show.legend = TRUE) +
-      scale_fill_manual(values = fills, limits = vd$levels, name = paste0(ulab(), " of street per ", ulab(), "\u00b2"), drop = FALSE) +
+    if (rel) {
+      spikes <- relief_spikes(cells, vd$hex_w, cxy, ky, radius_m)
+      dark <- setNames(vapply(fills, function(cl) shade_color(cl, 0.78), ""), paste0(vd$levels, relief_dark))
+      layer <- list(geom_sf(data = st_set_geometry(cells, tilt(cells)), aes(fill = cls), color = pal$plate, linewidth = 0.2, alpha = 0.3),
+                    geom_polygon(data = spikes$polys, aes(x, y, group = id, fill = face), color = pal$plate, linewidth = 0.12, show.legend = FALSE))
+      fill_scale <- scale_fill_manual(values = c(fills, dark), breaks = vd$levels, name = paste0(ulab(), " of street per ", ulab(), "\u00b2"), drop = FALSE)
+      vd$caption <- paste0(vd$caption, "; spikes rise faster than density, so dense areas stand out, up to ", round(spikes$cap), " ", ulab(), " per ", ulab(), "\u00b2, on the same scale for every place")
+    } else {
+      layer <- geom_sf(data = cells, aes(fill = cls), color = pal$plate, linewidth = 0.4)
+      fill_scale <- scale_fill_manual(values = fills, limits = vd$levels, name = paste0(ulab(), " of street per ", ulab(), "\u00b2"), drop = FALSE)
+    }
+    map_plot <- base + layer +
+      geom_sf(data = keys, aes(fill = cls), alpha = 0, color = NA, show.legend = TRUE) + fill_scale +
       guides(fill = guide_legend(nrow = 1, title.position = "top", label.position = "bottom", title.hjust = 0.5,
                                  override.aes = list(colour = pal$ring, linewidth = 0.25, alpha = 1))) + frame +
       theme(legend.key.width = unit(1.7, "cm"), legend.key.height = unit(0.42, "cm"), legend.key.spacing.x = unit(0, "pt"),
@@ -1771,7 +1813,9 @@ ui <- function(request) {
                                uiOutput("detail_help")),
               conditionalPanel("input.view == 'hierarchy'",
                                input_switch("locals", "Show local streets", value = FALSE),
-                               input_switch("labels", "Label through routes", value = TRUE))),
+                               input_switch("labels", "Label through routes", value = TRUE)),
+              conditionalPanel("input.view == 'density'",
+                               input_switch("relief", "Raise the density into spikes", value = FALSE))),
       section(3, "Choose a look",
               div(class = "style-picker",
                   radioButtons("style", NULL, choiceNames = style_choice_names, choiceValues = names(styles),
@@ -2248,7 +2292,7 @@ compare_rows <- function(lines, vh, vdir, net, units, detail) {
 share_params <- function(input, choice) {
   b <- function(x, default) if (is.null(x)) default else as.integer(isTRUE(x))
   p <- list(q = trimws(input$query %||% ""), c = choice, r = input$radius, u = as_unit(input$units), v = input$view, s = input$style, a = input$area,
-            l = b(input$locals, 0L), lb = b(input$labels, 1L), as = b(input$all_streets, 0L), ua = b(input$use_addr, 0L), ad = trimws(input$addr %||% ""))
+            l = b(input$locals, 0L), lb = b(input$labels, 1L), as = b(input$all_streets, 0L), ua = b(input$use_addr, 0L), rl = b(input$relief, 0L), ad = trimws(input$addr %||% ""))
   p <- Filter(function(x) length(x) == 1 && !is.na(x) && nzchar(as.character(x)), p)
   if (!nzchar(p$q %||% "")) return(NULL)
   p
@@ -2265,7 +2309,7 @@ parse_share <- function(qs) {
   pick <- function(k, ok) { v <- x[[k]]; if (length(v) == 1 && v %in% ok) v else NULL }
   flag <- function(k) { v <- x[[k]]; if (length(v) == 1 && v %in% c("0", "1")) v == "1" else NULL }
   out <- list(q = txt("q"), c = num("c", 1, 50), r = num("r", 0.1, 500), u = pick("u", c("km", "mi")), v = pick("v", names(views)), s = pick("s", names(styles)),
-              a = pick("a", c("dim", "city", "circle")), l = flag("l"), lb = flag("lb"), as = flag("as"), ua = flag("ua"), ad = txt("ad"), go = identical(x$go, "1"))
+              a = pick("a", c("dim", "city", "circle")), l = flag("l"), lb = flag("lb"), as = flag("as"), ua = flag("ua"), rl = flag("rl"), ad = txt("ad"), go = identical(x$go, "1"))
   if (!is.null(out$c)) out$c <- as.integer(out$c)
   if (is.null(out$q)) return(NULL)
   Filter(Negate(is.null), out)
@@ -2398,7 +2442,7 @@ server <- function(input, output, session) {
     if (!is.null(st$v)) updateRadioButtons(session, "view", selected = st$v)
     if (!is.null(st$s)) updateRadioButtons(session, "style", selected = st$s)
     if (!is.null(st$a)) updateRadioButtons(session, "area", selected = st$a)
-    for (k in c("l", "lb", "as", "ua")) if (!is.null(st[[k]])) bslib::update_switch(c(l = "locals", lb = "labels", as = "all_streets", ua = "use_addr")[[k]], value = st[[k]])
+    for (k in c("l", "lb", "as", "ua", "rl")) if (!is.null(st[[k]])) bslib::update_switch(c(l = "locals", lb = "labels", as = "all_streets", ua = "use_addr", rl = "relief")[[k]], value = st[[k]])
     if (!is.null(st$ad)) updateTextInput(session, "addr", value = st$ad)
     unit_prev(as_unit(st$u))                                   # the units were set by the link, not by a click, so nothing should be converted
     restore$pending <- st; restore$q <- st$q; auto_find(isolate(auto_find()) + 1)
@@ -2433,7 +2477,7 @@ server <- function(input, output, session) {
   observeEvent(input$reset, {
     updateRadioButtons(session, "units", selected = "km"); updateRadioButtons(session, "view", selected = "hierarchy")
     updateRadioButtons(session, "area", selected = "dim"); updateRadioButtons(session, "style", selected = "classic")
-    for (k in c("locals", "all_streets", "use_addr", "inspect")) bslib::update_switch(k, value = FALSE)
+    for (k in c("locals", "all_streets", "use_addr", "inspect", "relief")) bslib::update_switch(k, value = FALSE)
     bslib::update_switch("labels", value = TRUE); updateTextInput(session, "addr", value = "")
     unit_prev("km"); apply_plan(current_plan(), NULL, "km")
   })
@@ -2744,12 +2788,13 @@ server <- function(input, output, session) {
   built <- reactive({
     g <- geo(); pth <- active_paths()
     make_map(g$lines, g$place, g$lon, g$lat, g$radius_m, g$crs_m, label_roads = isTRUE(input$labels), style = sid(), view = input$view, units = as_unit(input$units),
-             show_local = isTRUE(input$locals), shape = g$shape, inside = g$inside, detail = g$detail, center_txt = g$center_txt, paths = pth)
+             show_local = isTRUE(input$locals), shape = g$shape, inside = g$inside, detail = g$detail, center_txt = g$center_txt, paths = pth,
+             relief = isTRUE(input$relief))
   })
   # Numbers for the tiles and the alt text; recomputed when the map type changes, never re-downloaded.
   vdata <- reactive({
     g <- geo()
-    view_data(input$view, g$lines, g$radius_m, center_of(g$lon, g$lat, g$crs_m), g$shape, g$detail, g$center_txt, as_unit(input$units), g$net, paths = active_paths())
+    view_data(input$view, g$lines, g$radius_m, center_of(g$lon, g$lat, g$crs_m), g$shape, g$detail, g$center_txt, as_unit(input$units), g$net, paths = active_paths(), fine = isTRUE(input$relief) && identical(input$view, "density"))
   })
 
   output$has_map <- renderText(if (tryCatch({ geo(); TRUE }, error = function(e) FALSE)) "yes" else "no")   # drives the Download section
@@ -2835,7 +2880,7 @@ server <- function(input, output, session) {
       fmt <- if (isTRUE(input$format %in% export_formats)) input$format else "png"
       g <- geo()
       cached <- file.path(export_dir(), paste0(export_key(g$place, g$lon, g$lat, g$radius_m, g$shape, g$inside, input$view, sid(), print_key(),
-                                                          isTRUE(input$locals), isTRUE(input$labels), g$detail, g$center_txt, as_unit(input$units), fmt, "v4"), ".", format_ext[[fmt]]))
+                                                          isTRUE(input$locals), isTRUE(input$labels), g$detail, g$center_txt, as_unit(input$units), fmt, isTRUE(input$relief), "v5"), ".", format_ext[[fmt]]))
       if (!file.exists(cached)) {
         tmp <- tempfile(tmpdir = export_dir(), fileext = paste0(".", format_ext[[fmt]]))
         draw_figure(built(), tmp, fmt, sid(), print_key = print_key())

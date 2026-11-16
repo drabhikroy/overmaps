@@ -1858,7 +1858,7 @@ test_that("N9 the server computes the network measures once per drawn map and sh
 test_that("SH1 a share link carries the settings and reads back the same; bad values are dropped", {
   inp <- list(query = "  Saint Paul & Minneapolis, MN ", radius = 2.5, units = "mi", view = "direction", style = "dusk", area = "circle", locals = FALSE, labels = TRUE, all_streets = TRUE, use_addr = TRUE, addr = "401 Davis Ave")
   pr <- env$share_params(inp, 2L); url <- env$share_url(pr, "https://example.org/app")
-  expect_match(url, "^https://example.org/app\\?q=Saint%20Paul%20%26%20Minneapolis%2C%20MN&c=2&r=2.5&u=mi&v=direction&s=dusk&a=circle&l=0&lb=1&as=1&ua=1&ad=401%20Davis%20Ave&go=1$")
+  expect_match(url, "^https://example.org/app\\?q=Saint%20Paul%20%26%20Minneapolis%2C%20MN&c=2&r=2.5&u=mi&v=direction&s=dusk&a=circle&l=0&lb=1&as=1&ua=1&rl=0&ad=401%20Davis%20Ave&go=1$")
   back <- env$parse_share(sub("^[^?]*", "", url))
   expect_equal(back$q, "Saint Paul & Minneapolis, MN"); expect_equal(back$c, 2L); expect_equal(back$r, 2.5); expect_equal(back$u, "mi"); expect_equal(back$v, "direction"); expect_equal(back$s, "dusk")
   expect_equal(back$a, "circle"); expect_false(back$l); expect_true(back$lb); expect_true(back$as); expect_true(back$ua); expect_equal(back$ad, "401 Davis Ave"); expect_true(back$go)
@@ -1936,7 +1936,7 @@ test_that("SH4 the share box shows a link that matches the current settings, and
     html <<- as.character(output$share_box$html)
     n0 <- length(ups); session$setInputs(reset = 1); session$flushReact(); after <<- ups[(n0 + 1):length(ups)]
   })
-  expect_match(html, "q=Elkins&amp;c=1&amp;r=4&amp;u=km&amp;v=speed&amp;s=mono&amp;a=dim&amp;l=1&amp;lb=0&amp;as=0&amp;ua=0&amp;go=1", fixed = TRUE)
+  expect_match(html, "q=Elkins&amp;c=1&amp;r=4&amp;u=km&amp;v=speed&amp;s=mono&amp;a=dim&amp;l=1&amp;lb=0&amp;as=0&amp;ua=0&amp;rl=0&amp;go=1", fixed = TRUE)
   expect_match(html, 'aria-label="Link to this map"', fixed = TRUE); expect_match(html, "streetMapsCopyLink", fixed = TRUE)
   want <- list(view = "hierarchy", area = "dim", style = "classic", units = "km")
   for (k in names(want)) expect_true(any(vapply(after, function(u) u$fn == "radio" && u$id == k && identical(u$selected, want[[k]]), TRUE)), info = k)
@@ -2860,4 +2860,60 @@ test_that("REL5 the documents state the real counts of ancient sites and civiliz
   expect_equal(nrow(env$ancient_sites), 15L); expect_equal(length(unique(env$ancient_sites$civ)), 11L)
   expect_match(read_root("README.md"), "fifteen ancient cities"); expect_match(read_root("README.md"), "11 civilizations")
   expect_match(read_root("CHANGELOG.md"), "11 civilizations")
+})
+
+# ---- Relief: the density hexagons raised into spikes ----------------------------------------------------------------------
+layer_geoms <- function(p) vapply(p[[1]]$layers, function(l) class(l$geom)[1], "")
+has_spikes <- function(p) any(vapply(p[[1]]$layers, function(l) is.data.frame(l$data) && "face" %in% names(l$data), TRUE))   # the north arrow is a polygon too, so look for the spike data itself
+test_that("RL1 relief is a switch on the density map: flat by default, spikes only when on, and other map types ignore it", {
+  lines <- demo_lines_prepped()
+  flat <- env$make_map(lines, "Test", lon0, lat0, 3000, crs0, view = "density")
+  up <- env$make_map(lines, "Test", lon0, lat0, 3000, crs0, view = "density", relief = TRUE)
+  expect_false(has_spikes(flat)); expect_true(has_spikes(up))
+  h1 <- env$make_map(lines, "Test", lon0, lat0, 3000, crs0, view = "hierarchy")
+  h2 <- env$make_map(lines, "Test", lon0, lat0, 3000, crs0, view = "hierarchy", relief = TRUE)
+  expect_equal(layer_geoms(h1), layer_geoms(h2)); expect_false(has_spikes(h2))
+})
+
+test_that("RL2 spike heights rise faster than density on one fixed scale, stop at the cap, and are drawn back to front", {
+  spike_cells <- function(x, y, d) sf::st_sf(dens = d, cls = factor(rep("a", length(d)), levels = "a"), geometry = sf::st_sfc(Map(function(a, b) sf::st_point(c(a, b)), x, y), crs = crs0))
+  d <- c(5, 12.5, 25, 60)
+  sp <- env$relief_spikes(spike_cells(c(0, 1000, 2000, 3000), rep(0, 4), d), 800, c(0, 0), 0.6, 3000)
+  apex <- sp$polys$y[seq(1, nrow(sp$polys), by = 6)][order(sp$polys$x[seq(1, nrow(sp$polys), by = 6)])]
+  expect_equal(apex, pmin(d / 25, 1.2)^1.5 * 0.3 * 3000)                     # the reference density reaches 0.3 of the radius; 60 is held at 1.2 times the reference
+  expect_gt(apex[3] / apex[2], 2)                                              # doubling the density more than doubles the height
+  expect_equal(sp$cap, 30)
+  near_far <- env$relief_spikes(spike_cells(c(0, 0), c(-1000, 1000), c(10, 10)), 800, c(0, 0), 0.6, 3000)
+  expect_gt(mean(near_far$polys$y[near_far$polys$id == 1]), mean(near_far$polys$y[near_far$polys$id == 3]))   # the northern, farther spike comes first
+  env$unit_env$u <- "mi"; withr::defer(env$unit_env$u <- "km")
+  expect_equal(env$relief_spikes(spike_cells(0, 0, 10), 800, c(0, 0), 0.6, 3000)$cap, 30 * env$km_per_mile)
+})
+
+test_that("RL3 the relief switch travels in a share link, and anything but 0 or 1 is ignored", {
+  pr <- env$share_params(list(query = "Elkins", radius = 2, units = "km", view = "density", style = "classic", area = "dim", relief = TRUE), 1L)
+  expect_equal(pr$rl, 1L)
+  expect_true(env$parse_share(sub("^[^?]*", "", env$share_url(pr, "https://example.org/app")))$rl)
+  expect_null(env$parse_share("?q=Elkins&rl=2")$rl)
+})
+
+test_that("RL4 a relief map renders in every style and the picture differs from the flat one", {
+  skip_if_not_installed("png")
+  lines <- demo_lines_prepped()
+  for (st in names(env$styles)) {
+    f <- tempfile(fileext = ".png"); g <- tempfile(fileext = ".png")
+    env$draw_figure(env$make_map(lines, "Test", lon0, lat0, 3000, crs0, style = st, view = "density", relief = TRUE), f, "png", st, preview = TRUE)
+    env$draw_figure(env$make_map(lines, "Test", lon0, lat0, 3000, crs0, style = st, view = "density"), g, "png", st, preview = TRUE)
+    expect_gt(file.size(f), 3000); expect_false(unname(tools::md5sum(f)) == unname(tools::md5sum(g)))
+  }
+})
+
+test_that("RL5 the server draws the relief from the same streets and the switch turns it off again", {
+  with_stubs(NULL)
+  testServer(env$server, {
+    session$setInputs(query = "Elkins", find = 1)
+    session$setInputs(choice = "1", radius = 3, labels = TRUE, style = "classic", view = "density", relief = FALSE, draw = 1)
+    expect_false(has_spikes(built()))
+    session$setInputs(relief = TRUE); expect_true(has_spikes(built()))
+    session$setInputs(relief = FALSE); expect_false(has_spikes(built()))
+  })
 })
