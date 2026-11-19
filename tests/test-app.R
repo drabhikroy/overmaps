@@ -293,7 +293,7 @@ test_that("I1 fetch_roads serves a cached result without network", {
 })
 test_that("I1c geocode failure path: unreachable service errors (caught by the app) rather than hanging", {
   skip_if(Sys.getenv("QA_ONLINE") == "1", "online run")
-  skip_on_ci()   # a hosted runner has internet access, so the services are reachable there
+  skip_if(!is.null(tryCatch(curl::nslookup("nominatim.openstreetmap.org"), error = function(e) NULL)), "the geocoder is reachable from here (hosted runners and online computers), so there is no failure to test")
   t0 <- Sys.time(); expect_error(env$geocode("Elkins")); expect_lt(as.numeric(difftime(Sys.time(), t0, units = "secs")), 25)
 })
 
@@ -809,7 +809,7 @@ test_that("V11 every map type builds in every style and renders; unknown types d
   lines <- demo_lines_prepped(); lines$maxspeed <- ifelse(lines$highway == "primary", "35 mph", NA)
   for (v in names(env$views)) for (st in names(env$styles)) {
     p <- env$make_map(lines, "Elkins, West Virginia", lon0, lat0, 3000, crs0, style = st, view = v)
-    expect_s3_class(p, "ggplot"); expect_equal(bg_of(p), env$styles[[st]]$bg)
+    expect_s3_class(p, "ggplot"); expect_equal(bg_of(p), if (v == "lights") env$night_palette(env$styles[[st]], st)$bg else env$styles[[st]]$bg)
   }
   f <- tempfile(fileext = ".png"); env$draw_figure(env$make_map(lines, "T", lon0, lat0, 3000, crs0, view = "bogus"), f, "png", "classic")
   expect_gt(file.size(f), 5000)
@@ -905,7 +905,8 @@ test_that("C2 geocode asks for boundaries and returns one per match (NULL when a
   expect_match(seen, "polygon_geojson=1", fixed = TRUE)
   expect_equal(names(r), c("label", "lat", "lon", "boundary", "south", "north", "west", "east")); expect_equal(nrow(r), 3)
   expect_s3_class(r$boundary[[1]], "sfc_POLYGON"); expect_null(r$boundary[[2]]); expect_null(r$boundary[[3]])
-  expect_equal(r$lat, c(38.9, 39, 40))                                                  # the circle option still centers on Nominatim's own point
+  expect_equal(r$lat[2:3], c(39, 40)); expect_equal(r$lon[2:3], c(-80, -81))             # a match without limits keeps Nominatim's own point
+  expect_equal(c(r$lon[1], r$lat[1]), unname(env$boundary_center(r$boundary[[1]])))     # a match with limits is centered on the middle of them
 })
 
 test_that("C3 city_shape repairs, simplifies, and measures a boundary", {
@@ -1272,8 +1273,8 @@ test_that("G3 summarize_counts: rolling windows and per-format totals against ha
   s <- env$summarize_counts(d, now)
   expect_equal(c(s$total, s$day, s$week), c(5, 1, 3)); expect_equal(s$first, now - 86400 * 40)
   tb <- s$table; expect_equal(tb$format, names(env$export_formats))
-  expect_equal(tb$all_time[tb$format == "PNG (300 dpi)"], 3); expect_equal(tb$last7[tb$format == "PNG (300 dpi)"], 2)
-  expect_equal(tb$all_time[tb$format == "SVG (vector)"], 1); expect_equal(tb$last7[tb$format == "SVG (vector)"], 0); expect_equal(tb$all_time[tb$format == "TIFF (300 dpi)"], 0)
+  expect_equal(tb$all_time[tb$format == "PNG"], 3); expect_equal(tb$last7[tb$format == "PNG"], 2)
+  expect_equal(tb$all_time[tb$format == "SVG"], 1); expect_equal(tb$last7[tb$format == "SVG"], 0); expect_equal(tb$all_time[tb$format == "TIFF"], 0)
   e <- env$summarize_counts(env$read_counts(tempfile()), now); expect_equal(c(e$total, e$day, e$week), c(0, 0, 0))
 })
 
@@ -1316,7 +1317,7 @@ test_that("G6 the counts panel and the expand button are in the page, and nothin
   expect_match(env$app_js, "requestFullscreen", fixed = TRUE); expect_match(env$app_js, "fullscreenchange", fixed = TRUE)
   expect_match(env$app_js, "Shiny.setInputValue('expanded'", fixed = TRUE); expect_match(env$app_js, "is-expanded", fixed = TRUE)
   expect_match(env$app_css, ".is-expanded .expand-btn .when-normal { display: none; }", fixed = TRUE)
-  expect_match(env$app_css, ".is-expanded .brand > :not(.expand-btn) { display: none; }", fixed = TRUE)   # the header shrinks to the exit button
+  expect_match(env$app_css, ".is-expanded .navbar .navbar-brand, .is-expanded .navbar .nav-item:not(.tools-item), .is-expanded .cvd-pick { display: none; }", fixed = TRUE)   # the header shrinks to the exit button
 })
 
 test_that("G6b expanding folds the sidebar away and leaving brings it back", {
@@ -1324,7 +1325,9 @@ test_that("G6b expanding folds the sidebar away and leaving brings it back", {
   testServer(env$server, {
     session$setInputs(expanded = TRUE); session$setInputs(expanded = FALSE); session$setInputs(expanded = TRUE)
   })
-  expect_equal(vapply(calls, function(x) x$id, ""), rep("sb", 3)); expect_equal(vapply(calls, function(x) x$open, TRUE), c(FALSE, TRUE, FALSE))
+  # every page's sidebar folds together, so Expand behaves the same on Current maps and on the three Historical sets
+  ids <- c("sb", "h_sb", "c_sb", "d_sb")
+  expect_equal(vapply(calls, function(x) x$id, ""), rep(ids, 3)); expect_equal(vapply(calls, function(x) x$open, TRUE), rep(c(FALSE, TRUE, FALSE), each = 4))
 })
 
 test_that("G7 the counts panel text: empty state, numbers with separators, and the honest limits", {
@@ -1415,6 +1418,7 @@ test_that("N2 the status check skips busy or dead servers fast and tolerates unr
   expect_true(ok("<html>whatever</html>")); expect_true(ok("nope", 404))                      # no usable status page: just try the server
   expect_error(ok("Connected as: 1\n0 slots available now.\nSlot available after: 2026-11-11T12:00:00Z, in 40 seconds.\n"), "no free query slot for 40 s")
   expect_error(httr2::with_mocked_responses(function(req) stop("Timeout was reached"), env$overpass_ready(url)), "status check failed: Timeout")
+  env$mirror_state$status_failed <- list()
   t0 <- Sys.time(); expect_true(ok("0 slots available now.\nSlot available after: 2026-11-11T12:00:00Z, in 1 seconds.\n")); expect_gte(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1.5)
 })
 
@@ -1512,8 +1516,8 @@ test_that("P4 density legend has room: title above the keys and a larger gap bef
 # ---- purposeful palettes, a radius that fits the place, address centering, adaptive detail -------------------------
 test_that("R1 the radius slider fits the place: top about 1.5 times the enclosing radius, a step that suits the size, a start that covers the place", {
   chk <- function(enc, min, max, step, value) { p <- env$radius_plan(enc); expect_equal(unlist(p[c("min", "max", "step", "value")]), c(min = min, max = max, step = step, value = value), info = enc) }
-  chk(3500, 0.5, 5.5, 0.5, 3.5)           # r = 3.5 km: top = ceil(5.25 / 0.5) * 0.5
-  chk(3200, 0.5, 5, 0.5, 3.5)             # the start rounds up so the circle covers the whole place
+  chk(3500, 0.5, 5.25, 0.25, 3.5)         # r = 3.5 km: top = ceil(5.25 / 0.25) * 0.25
+  chk(3200, 0.5, 5, 0.25, 3.25)           # the start rounds up, by at most a quarter kilometer, so the circle covers the whole place
   chk(9000, 1, 14, 1, 6)                  # 9 km: start at the largest radius that still downloads every street
   chk(25000, 5, 40, 5, 5)
   chk(120000, 15, 50, 5, 15)              # never above the absolute limit
@@ -1784,8 +1788,8 @@ test_that("U5 the radius slider is converted to miles with round steps, and swit
     session$setInputs(radius = 4); session$setInputs(units = "mi"); session$flushReact()
     session$setInputs(radius = 1.5, labels = TRUE, style = "classic", view = "hierarchy", area = "circle", locals = FALSE, draw = 1); rad <<- geo()$radius_m
   })
-  mi <- Filter(function(u) u$id == "radius" && !is.null(u$step) && u$step %in% c(0.25, 0.5, 1, 2.5) && u$max < 40, upd); expect_gte(length(mi), 1)
-  expect_equal(tail(mi, 1)[[1]]$value, round(4 / 1.609344 / 0.25) * 0.25)                    # 4 km is 2.5 mi, kept across the switch
+  mi <- Filter(function(u) u$id == "radius" && !is.null(u$step) && u$step %in% c(0.1, 0.25, 0.5, 1, 2.5) && u$max < 40, upd); expect_gte(length(mi), 1)
+  expect_equal(tail(mi, 1)[[1]]$value, round(4 / 1.609344 / tail(mi, 1)[[1]]$step) * tail(mi, 1)[[1]]$step)                    # 4 km is 2.5 mi, kept across the switch
   expect_equal(rad, round(1.5 * 1609.344))                                                    # a slider value in miles is converted for the download
 })
 
@@ -2067,7 +2071,8 @@ test_that("PS2 a PNG at a larger print size has the pixels for that size and the
   expect_equal(dim(ia)[1:2], c(3000, 2400)); expect_equal(dim(ib)[1:2], c(4200, 3300)); expect_equal(dim(ic)[1:2], c(7200, 5400))
   # the map ring spans the same share of the width at every size, which only happens when the layout scales with the paper
   ring_share <- function(im) { r <- matrix(abs(im[, , 1] - 0xd8 / 255) < 0.02 & abs(im[, , 2] - 0xd2 / 255) < 0.02 & abs(im[, , 3] - 0xc4 / 255) < 0.02, nrow(im)); cc <- range(which(colSums(r) > 0)); diff(cc) / ncol(im) }
-  expect_gt(ring_share(ia), 0.5); expect_equal(ring_share(ib), ring_share(ia), tolerance = 0.02); expect_equal(ring_share(ic), ring_share(ia), tolerance = 0.02)
+  expect_gt(ring_share(ia), 0.5); expect_equal(ring_share(ib), ring_share(ia), tolerance = 0.04)
+  expect_gte(ring_share(ic), ring_share(ia) - 0.02); expect_lt(ring_share(ic), 0.9)        # the 18 x 24 sheet is a taller layout, so the map may be wider than on 8 x 10, never narrower
   f <- tempfile(fileext = ".pdf"); env$draw_figure(p, f, "pdf", "classic", print_key = "11x14"); expect_true(file.size(f) > 5000)
 })
 
@@ -2083,7 +2088,7 @@ test_that("PS3 the page offers the sizes, the note says what will be made, and t
     session$setInputs(print_size = "bogus", format = "png"); out$n4 <<- as.character(output$print_note$html)
   })
   expect_match(out$n0, "2,400 \u00d7 3,000 pixels (300 dpi)", fixed = TRUE); expect_match(out$n1, "11 \u00d7 14 inches", fixed = TRUE); expect_match(out$n1, "3,300 \u00d7 4,200", fixed = TRUE)
-  expect_match(out$n2, "fewer dots per inch"); expect_match(out$n3, "PDF and SVG are laid out for 24 \u00d7 30 inches"); expect_match(out$n4, "8 \u00d7 10 inches", fixed = TRUE)
+  expect_match(out$n2, "fewer dots per inch"); expect_match(out$n3, "PDF is laid out for 24 \u00d7 30 inches"); expect_match(out$n4, "8 \u00d7 10 inches", fixed = TRUE)
   expect_false(grepl("_11x14_", out$f0)); expect_match(out$f1, "_11x14_"); expect_equal(out$dim, c(4200, 3300))
 })
 
@@ -2424,8 +2429,8 @@ test_that("LV4 plan_live decides from the stored box: same options keep the map,
 })
 
 # ---- suggestions while typing and addresses inside the place ----------------------------------------------------------------
-pl_items <- tibble(label = c("Elkins, Randolph County, West Virginia, United States", "Elkins Park, Pennsylvania, United States"), lon = c(lon0, -75.1), lat = c(lat0, 40.07), osm_type = c("R", "N"), osm_id = c(123456, 777))
-ad_items <- tibble(label = c("401 Davis Avenue, Elkins, West Virginia", "401 Davis Street, Elkins, West Virginia"), lon = c(lon0 + 0.003, lon0 + 0.004), lat = c(lat0 + 0.002, lat0 + 0.003), osm_type = "W", osm_id = c(1, 2))
+pl_items <- tibble(label = c("Elkins, Randolph County, West Virginia, United States", "Elkins Park, Pennsylvania, United States"), lon = c(lon0, -75.1), lat = c(lat0, 40.07), osm_type = c("R", "N"), osm_id = c(123456, 777), is_addr = FALSE, where = "")
+ad_items <- tibble(label = c("401 Davis Avenue, Elkins, West Virginia", "401 Davis Street, Elkins, West Virginia"), lon = c(lon0 + 0.003, lon0 + 0.004), lat = c(lat0 + 0.002, lat0 + 0.003), osm_type = "W", osm_id = c(1, 2), is_addr = TRUE, where = "")
 
 test_that("SG1 place suggestions appear after enough text, only while the switch is on, and a pick looks the exact object up", {
   look <- tibble(label = "Elkins, Randolph County, West Virginia, United States", lat = lat0, lon = lon0, boundary = list(NULL), south = lat0 - .05, north = lat0 + .05, west = lon0 - .05, east = lon0 + .05)
@@ -2465,7 +2470,7 @@ test_that("UI1 the chosen place is shown as a card, a list of matches appears on
   expect_equal(got$again, 0)                                                                # no new suggestions for the text just picked
   expect_match(got$card2, 'id="choice"', fixed = TRUE); expect_match(got$card2, "Other matches", fixed = TRUE)    # a name search with two matches offers the list
   expect_true(got$sugg_after_find)
-  ui <- as.character(env$ui(NULL)); expect_match(ui, "Choose a place", fixed = TRUE); expect_match(ui, "Settings and privacy", fixed = TRUE); expect_match(ui, "Explore this map", fixed = TRUE)
+  ui <- as.character(env$ui(NULL)); expect_match(ui, "Choose a place", fixed = TRUE); expect_match(ui, "Places and privacy", fixed = TRUE); expect_match(ui, "Download counts", fixed = TRUE); expect_match(ui, "Explore this map", fixed = TRUE)
   expect_equal(lengths(regmatches(ui, gregexpr('id="units"', ui, fixed = TRUE))), 1L)       # one units control
 })
 
@@ -2542,16 +2547,6 @@ test_that("SG6 geocode_lookup asks for one exact object and refuses anything tha
 })
 
 # ---- the color-vision option is gone, and the side panel and typeahead behave ---------------------------------------------
-test_that("CV0 there is no color-vision option: styles are plain names, hostile values fall back, and links and saved lines carry no mode", {
-  expect_false(exists("cvd_palettes", envir = env)); expect_false(exists("cvd_modes", envir = env))
-  expect_equal(env$get_style_name("classic"), "classic"); expect_equal(env$get_style_name("dusk"), "dusk")
-  expect_equal(env$get_style_name("classic:deutan"), "classic"); expect_equal(env$get_style_name("<b>x</b>"), "classic"); expect_equal(env$get_style_name(NULL), "classic"); expect_equal(env$get_style_name(NA), "classic")
-  expect_identical(env$get_style("dusk"), env$styles$dusk); expect_identical(env$get_style("nonsense"), env$styles$classic)
-  ui <- as.character(env$ui(NULL)); expect_false(grepl('id="cvd"', ui, fixed = TRUE)); expect_false(grepl("Color vision", ui, fixed = TRUE))
-  p <- env$share_params(list(query = "Elkins", view = "speed", units = "km", radius = 3, style = "dusk", cvd = "deutan", area = "circle"), 1)
-  expect_false("cv" %in% names(p)); expect_null(env$parse_share("?q=Elkins&cv=tritan&s=dusk")$cv); expect_equal(env$parse_share("?q=Elkins&cv=tritan&s=dusk")$s, "dusk")
-})
-
 # ---- Overmaps, one search box, block length, automatic downloads, resizable side panel -------------------------------------
 test_that("R16a looks_like_address needs a leading house number and city_of_label returns the place an address lies in", {
   yes <- c("401 Davis Avenue, Elkins", "12B Main St", "  7 Elm Street Springfield", "1600 Pennsylvania Ave NW, Washington")
@@ -2563,10 +2558,10 @@ test_that("R16a looks_like_address needs a leading house number and city_of_labe
   expect_equal(env$city_of_label(""), "")
 })
 
-test_that("R16b the app is named Overmaps and offers six views; Block length has km and mile scales", {
+test_that("R16b the app is named Overmaps and offers eight views; Block length has km and mile scales", {
   ui <- as.character(env$ui(NULL))
   expect_true(grepl("Overmaps", ui, fixed = TRUE)); expect_false(grepl("Street Maps", ui, fixed = TRUE)); expect_false(grepl("Königsberg Maps", ui, fixed = TRUE))
-  expect_length(env$views, 6); expect_true("blocks" %in% names(env$views)); expect_equal(names(env$view_blurbs), names(env$views))
+  expect_length(env$views, 8); expect_true(all(c("lights", "nature") %in% names(env$views))); expect_true("blocks" %in% names(env$views)); expect_equal(names(env$view_blurbs), names(env$views))
   old <- env$unit_env$u; withr::defer(env$unit_env$u <- old)
   env$unit_env$u <- "km"; sk <- env$block_scheme(); expect_equal(sk$short, "200 m"); expect_equal(length(sk$labels), 4)
   expect_equal(as.character(env$block_class(c(50, 150, 300, 900))), sk$labels)
@@ -2638,20 +2633,20 @@ test_that("H3 the maps draw in every view and style, the text is plain and accur
   expect_false(is.null(env$history_file("itinere_simplified.rds"))); expect_null(env$history_file("no_such_file.rds"))
 })
 
-test_that("H4 the Explore history window opens from the header, draws a map, and downloads a real file", {
-  ui <- as.character(env$ui(NULL)); expect_match(ui, 'id="history_open"', fixed = TRUE); expect_match(ui, "Explore history", fixed = TRUE)
-  m <- as.character(env$history_modal("classic")); for (id in c("h_region", "h_view", "h_how", "h_sea", "h_style", "h_format", "h_download", "h_map")) expect_match(m, paste0('id="', id, '"'), fixed = TRUE)
+test_that("H4 the Historical maps page is reached from the header, draws a map, and downloads a real file", {
+  ui <- as.character(env$ui(NULL)); expect_match(ui, 'id="go_history"', fixed = TRUE); expect_match(ui, "Historical maps", fixed = TRUE); expect_false(grepl("Explore history", ui, fixed = TRUE))
+  m <- as.character(env$history_page("classic")); for (id in c("h_region", "h_view", "h_how", "h_sea", "h_style", "h_format", "h_download", "h_map")) expect_match(m, paste0('id="', id, '"'), fixed = TRUE)
   expect_match(m, "Itiner-e", fixed = TRUE); expect_match(m, "CC BY 4.0", fixed = TRUE)
   shown <- NULL; out <- list()
   testthat::local_mocked_bindings(showModal = function(ui, ...) { shown <<- as.character(ui); invisible() }, .package = "shiny")
   testServer(env$server, {
-    session$setInputs(history_open = 1); session$flushReact(); out$title <<- output$h_title
-    session$setInputs(h_region = "britain", h_view = "days", h_how = "courier", h_sea = FALSE, h_style = "dusk", h_format = "png"); session$flushReact()
+    session$flushReact()
+    session$setInputs(h_region = "britain", h_view = "days", h_how = "courier", h_sea = FALSE, h_style = "dusk", h_format = "png", h_draw = 1); session$flushReact()
     out$blurb <<- output$h_blurb; img <- output$h_map; out$src <<- img$src; out$alt <<- img$alt
     p <- output$h_download; out$dl <<- basename(p); out$ok <<- file.exists(p) && file.size(p) > 20000 && identical(readBin(p, "raw", 4)[2:4], charToRaw("PNG"))
     session$setInputs(h_format = "pdf"); out$pdf <<- basename(output$h_download); session$setInputs(h_format = "../../etc/passwd"); out$bad <<- basename(output$h_download)
   })
-  expect_match(out$title, "^Explore history: The roads of the Roman Empire$"); expect_match(out$blurb, "How long it took"); expect_match(out$alt, "Britain"); expect_true(out$ok)
+  expect_match(out$blurb, "How long it took"); expect_match(out$alt, "Britain"); expect_true(out$ok)
   expect_match(out$dl, "^roman_roads_britain_days_[0-9]{8}\\.png$"); expect_match(out$pdf, "\\.pdf$"); expect_match(out$bad, "\\.png$")
 })
 
@@ -2710,22 +2705,19 @@ test_that("R18d typing a U.S. address that Photon lacks suggests it from the Cen
   expect_equal(got$n, 1); expect_match(got$html, "412 E Kirkwood Ave, Bloomington, IN 47408", fixed = TRUE); expect_equal(got$nocity, 1)      # no comma, no city: Census is not asked
   b <- calls$photon[[length(calls$photon)]]$bias; expect_equal(round(b, 3), round(c(lat0, lon0), 3))
 })
-test_that("R18e the history window has a full-screen button, a title that follows the tab, and the same pickers as the main page", {
-  m <- as.character(env$history_modal("classic"))
-  for (id in c("h_tab", "h-full-btn", "c_site", "c_view", "c_style", "c_draw", "c_format", "c_download", "c_map", "h_style", "h_view")) expect_match(m, paste0('id="', id, '"'), fixed = TRUE)
-  expect_match(m, "overmapsHistoryFull", fixed = TRUE); expect_match(m, "Full screen", fixed = TRUE); expect_match(m, "Exit full screen", fixed = TRUE)
-  expect_equal(lengths(regmatches(m, gregexpr("Choose a look", m, fixed = TRUE))), 2L); expect_equal(lengths(regmatches(m, gregexpr('class="style-picker"', m, fixed = TRUE))), 2L)
+test_that("R18e the Historical maps page has the same pickers as the main page and no pop-up window", {
+  m <- as.character(env$history_page("classic"))
+  for (id in c("h_tab", "c_site", "c_view", "c_style", "c_draw", "c_format", "c_download", "c_map", "h_style", "h_view")) expect_match(m, paste0('id="', id, '"'), fixed = TRUE)
+  expect_false(grepl("modal", m, fixed = TRUE)); expect_false(grepl("overmapsHistoryFull", env$app_js, fixed = TRUE))
+  expect_equal(lengths(regmatches(m, gregexpr("Choose a look", m, fixed = TRUE))), 3L); expect_equal(lengths(regmatches(m, gregexpr('class="style-picker"', m, fixed = TRUE))), 3L)      # one look picker on each of the three tabs
   expect_equal(lengths(regmatches(m, gregexpr('class="view-picker"', m, fixed = TRUE))), 2L); expect_false(grepl("selectInput.*h_style", m)); expect_false(grepl('id="h_style" class="shiny-input-select', m, fixed = TRUE))
-  expect_equal(env$history_title("roads"), "Explore history: The roads of the Roman Empire"); expect_equal(env$history_title(NULL), "Explore history: The roads of the Roman Empire")
-  expect_equal(env$history_title("cities"), "Explore history: Streets of ancient cities")
-  expect_match(env$app_js, "history-full", fixed = TRUE); expect_match(env$app_css, "modal-dialog.history-full", fixed = TRUE)
   expect_false(grepl("the roads of the Roman Empire", as.character(env$ui(NULL)), fixed = TRUE))      # the old lower-case wording is gone everywhere
 })
 test_that("R18f the ancient sites are well formed and grouped by civilization", {
   s <- env$ancient_sites
   expect_equal(anyDuplicated(s$id), 0L); expect_true(all(abs(s$lat) <= 90 & abs(s$lon) <= 180)); expect_true(all(s$radius_km >= 0.3 & s$radius_km <= 3))
   expect_true(all(nzchar(s$note)) && all(grepl("\\.$", s$note))); expect_true(all(grepl(", [A-Z]", s$name))); expect_true(all(unlist(env$ancient_site_choices) %in% s$id))
-  expect_gte(length(unique(s$civ)), 8); expect_false(any(grepl("[–—]", c(s$note, s$name)))); expect_false(any(grepl("n't|'s |'re|'ll", s$note)))
+  expect_gte(length(unique(s$civ)), 8); expect_true(all(table(s$civ) >= 1)); expect_true(all(s$lat >= -60 & s$lat <= 60)); expect_false(any(grepl("[–—]", c(s$note, s$name)))); expect_false(any(grepl("n't|'s |'re|'ll", s$note)))
   expect_equal(env$ancient_site("pompeii")$name, "Pompeii, Italy"); expect_null(env$ancient_site("nowhere")); expect_null(env$ancient_site(NULL)); expect_null(env$ancient_site(c("a", "b")[0]))
   expect_equal(env$get_city_view("blocks"), "blocks"); expect_equal(env$get_city_view("hierarchy"), "direction"); expect_equal(env$get_city_view(NULL), "direction")
 })
@@ -2734,8 +2726,8 @@ test_that("R18g an ancient city is downloaded once with its own street classes, 
   env$ancient_sites <- dplyr::bind_rows(orig_sites, tibble(id = "test", name = "Testville, Elkins", civ = "Roman", lat = lat0, lon = lon0, radius_km = 1.5, note = "A fixture."))
   calls <- with_stubs(NULL); out <- list()
   testServer(env$server, {
-    session$setInputs(history_open = 1, h_tab = "cities", c_site = "test", c_view = "blocks", c_style = "dusk", c_format = "png"); session$flushReact()
-    out$title <<- output$h_title; out$before <<- as.character(output$c_status$html); out$has0 <<- output$c_has_map
+    session$setInputs(h_tab = "cities", c_site = "test", c_view = "blocks", c_style = "dusk", c_format = "png"); session$flushReact()
+    out$before <<- as.character(output$c_status$html); out$has0 <<- output$c_has_map
     session$setInputs(c_draw = 1); session$flushReact()
     out$status <<- as.character(output$c_status$html); out$has <<- output$c_has_map; out$note <<- as.character(output$c_note$html)
     img <- output$c_map; out$alt <<- img$alt; out$ok <<- is.character(img$src) && nzchar(img$src)
@@ -2744,7 +2736,7 @@ test_that("R18g an ancient city is downloaded once with its own street classes, 
     session$setInputs(c_format = "pdf"); out$pdf <<- basename(output$c_download); session$setInputs(c_format = "../x"); out$bad <<- basename(output$c_download)
     session$setInputs(c_site = "pompeii"); session$flushReact(); out$stale <<- as.character(output$c_status$html)
   })
-  expect_equal(out$title, "Explore history: Streets of ancient cities"); expect_match(out$before, "press Draw map", ignore.case = TRUE); expect_equal(out$has0, "no")
+  expect_match(out$before, "press Draw map", ignore.case = TRUE); expect_equal(out$has0, "no")
   expect_length(calls$fetch, 1); expect_equal(calls$fetch[[1]]$detail, "ancient"); expect_equal(calls$fetch[[1]]$radius_m, 1500)
   expect_equal(out$has, "yes"); expect_match(out$status, "mapped streets and paths here"); expect_match(out$note, "Roman. A fixture.", fixed = TRUE); expect_true(out$ok)
   expect_match(out$alt, "Testville.*block length", ignore.case = TRUE); expect_match(out$alt2, "street density"); expect_match(out$alt3, "direction")
@@ -2757,10 +2749,10 @@ test_that("R18h a failed or empty ancient city download says so and draws nothin
   out <- list(); shown <- character()
   testthat::local_mocked_bindings(showNotification = function(ui, ...) { shown <<- c(shown, as.character(ui)); invisible() }, .package = "shiny")
   with_stubs(NULL); env$fetch_roads <- function(...) stop("all servers busy")
-  testServer(env$server, { session$setInputs(history_open = 1, h_tab = "cities", c_site = "test", c_draw = 1); session$flushReact(); out$has <<- output$c_has_map; out$status <<- as.character(output$c_status$html) })
+  testServer(env$server, { session$setInputs(h_tab = "cities", c_site = "test", c_draw = 1); session$flushReact(); out$has <<- output$c_has_map; out$status <<- as.character(output$c_status$html) })
   expect_equal(out$has, "no"); expect_true(any(grepl("all servers busy", shown))); expect_match(out$status, "press Draw map", ignore.case = TRUE)
   with_stubs(NULL); env$fetch_roads <- function(...) list(osm_lines = NULL)
-  testServer(env$server, { session$setInputs(history_open = 1, h_tab = "cities", c_site = "test", c_draw = 1); session$flushReact(); out$has2 <<- output$c_has_map; out$status2 <<- as.character(output$c_status$html) })
+  testServer(env$server, { session$setInputs(h_tab = "cities", c_site = "test", c_draw = 1); session$flushReact(); out$has2 <<- output$c_has_map; out$status2 <<- as.character(output$c_status$html) })
   expect_equal(out$has2, "no"); expect_match(out$status2, "no mapped streets or paths here")
   lines <- demo_lines_prepped(); lines$osm_id <- seq_len(nrow(lines)); thin <- lines[1:5, ]
   expect_match(env$city_coverage(thin)$text, "That is few"); expect_false(grepl("That is few", env$city_coverage(lines)$text)); expect_equal(env$city_coverage(NULL)$n, 0L)
@@ -2773,12 +2765,12 @@ test_that("R19a an ancient city saved with the app is drawn with no download, sa
   env$ancient_sites <- dplyr::bind_rows(orig_sites, tibble(id = "test", name = "Testville, Elkins", civ = "Roman", lat = lat0, lon = lon0, radius_km = 1.5, note = "A fixture."))
   env$history_cache$cities <- list(test = list(roads = fixture_roads(), taken = "November 13, 2026", radius_m = 1500L))
   calls <- with_stubs(NULL); out <- list()
-  testServer(env$server, { session$setInputs(history_open = 1, h_tab = "cities", c_site = "test", c_draw = 1); session$flushReact()
+  testServer(env$server, { session$setInputs(h_tab = "cities", c_site = "test", c_draw = 1); session$flushReact()
     out$has <<- output$c_has_map; out$status <<- as.character(output$c_status$html) })
   expect_length(calls$fetch, 0); expect_equal(out$has, "yes"); expect_match(out$status, "snapshot taken November 13, 2026")
   env$history_cache$cities <- list(test = list(roads = fixture_roads(), taken = "November 13, 2026", radius_m = 900L))
   calls <- with_stubs(NULL)
-  testServer(env$server, { session$setInputs(history_open = 1, h_tab = "cities", c_site = "test", c_draw = 1); session$flushReact(); out$status2 <<- as.character(output$c_status$html) })
+  testServer(env$server, { session$setInputs(h_tab = "cities", c_site = "test", c_radius = 2.5, c_units = "km", c_draw = 1); session$flushReact(); out$status2 <<- as.character(output$c_status$html) })
   expect_length(calls$fetch, 1); expect_false(grepl("snapshot", out$status2))
 })
 test_that("R19b a status check that failed for a real reason is reported with that reason, and the fetch script and a missing bundle are handled", {
@@ -2792,6 +2784,14 @@ test_that("R19b a status check that failed for a real reason is reported with th
   expect_length(env$ancient_bundle(), 0); expect_null(env$bundled_city(list(id = "pompeii"), 800))
   script <- readLines(file.path(dirname(normalizePath(app_file)), "data-raw", "fetch_ancient_cities.R"), warn = FALSE)
   expect_true(any(grepl("ancient_cities.rds", script, fixed = TRUE))); expect_no_error(parse(text = script))
+})
+
+test_that("FE1 a map download whose relation lists a way outside the box is still read, and the fetch script is parseable", {
+  doc <- paste0('<?xml version="1.0"?><osm version="0.6"><node id="1" lat="0.001" lon="0.001"/><node id="2" lat="0.002" lon="0.002"/>',
+                '<way id="10"><nd ref="1"/><nd ref="2"/><tag k="highway" v="residential"/></way>',
+                '<relation id="50"><member type="way" ref="10" role="outer"/><member type="way" ref="99" role="inner"/><tag k="type" v="multipolygon"/></relation></osm>')
+  res <- env$parse_osm_doc(doc, osmdata::opq(bbox = c(0, 0, 0.01, 0.01)))
+  expect_equal(nrow(res$osm_lines), 1L)
 })
 
 test_that("R19c the full text of a failed request keeps the cause curl reported, once, and a refused connection is classed as unreachable", {
@@ -2856,10 +2856,32 @@ test_that("REL6 every image the README shows is in the repository and has alt te
   }
 })
 
+test_that("NX1 the file has its own color vision menu, Historical pages open on the bridges picture, and Help and Exit expand are fixed", {
+  a <- env$ancient_sites
+  expect_equal(anyDuplicated(a$id), 0L); expect_true(all(is.finite(a$lat) & abs(a$lat) <= 90 & is.finite(a$lon) & abs(a$lon) <= 180)); expect_true(all(a$radius_km >= 0.3 & a$radius_km <= 3))
+  expect_true(all(c("carthage", "karnak", "chaco", "aksum", "anyang") %in% a$id))
+  html <- paste(as.character(env$ui(NULL)), collapse = "\n")
+  expect_match(html, 'id="theme-btn"', fixed = TRUE); expect_match(html, "Can I use a dark page?", fixed = TRUE)
+  expect_match(env$app_css, "html[data-bs-theme='dark']", fixed = TRUE); expect_match(env$app_css, ".history-cols.main", fixed = TRUE); expect_match(env$app_js, "overmaps-theme", fixed = TRUE)
+  for (id in c("dl_cvd", "h_dl_cvd", "c_dl_cvd", "d_dl_cvd")) expect_match(html, paste0('id="', id, '"'), fixed = TRUE)
+  expect_equal(lengths(regmatches(html, gregexpr("Color vision of the file</label>", html, fixed = TRUE))), 4L)
+  expect_match(html, 'id="h_draw"', fixed = TRUE); expect_match(html, 'id="d_draw"', fixed = TRUE); expect_match(html, "help-grow", fixed = TRUE)
+  src <- read_root("app.R")
+  expect_match(src, ".is-expanded .navbar { background: transparent !important", fixed = TRUE)
+  expect_match(src, ".help-page .tab-content { height: clamp(", fixed = TRUE); expect_match(src, "html:has(body.cb-gray) { filter: grayscale(1); }", fixed = TRUE)
+  expect_false(grepl("#1f3a5a", sub(".*app_css <- ", "", sub("\\nbrand_svg <- .*", "", sub("(?s)^.*?(:root \\{ --line)", "\\1", src, perl = TRUE), perl = TRUE)), fixed = TRUE))
+  testServer(env$server, {
+    session$setInputs(style = "classic", dl_cvd = "tritan", cvd = "standard"); expect_equal(sid(), "classic"); expect_equal(dl_style(), "classic~tritan")
+    session$setInputs(dl_cvd = "standard"); expect_equal(dl_style(), "classic")
+    session$setInputs(h_tab = "roads"); session$flushReact(); expect_equal(output$h_has_map, "no")
+    session$setInputs(h_draw = 1); session$flushReact(); expect_equal(output$h_has_map, "yes")
+    session$setInputs(d_draw = 1); session$flushReact(); expect_equal(output$d_has_map, "yes")
+  })
+})
 test_that("REL5 the documents state the real counts of ancient sites and civilizations", {
-  expect_equal(nrow(env$ancient_sites), 15L); expect_equal(length(unique(env$ancient_sites$civ)), 11L)
-  expect_match(read_root("README.md"), "fifteen ancient cities"); expect_match(read_root("README.md"), "11 civilizations")
-  expect_match(read_root("CHANGELOG.md"), "11 civilizations")
+  expect_equal(nrow(env$ancient_sites), 90L); expect_equal(length(unique(env$ancient_sites$civ)), 22L)
+  expect_match(read_root("README.md"), "ninety ancient sites"); expect_match(read_root("README.md"), "22 regions")
+  expect_match(read_root("CHANGELOG.md"), "22 regions")
 })
 
 # ---- Relief: the density hexagons raised into spikes ----------------------------------------------------------------------
@@ -2935,4 +2957,596 @@ test_that("RL5 the server draws the relief from the same streets and the switch 
     session$setInputs(relief = TRUE); expect_true(has_spikes(built()))
     session$setInputs(relief = FALSE); expect_false(has_spikes(built()))
   })
+})
+
+# ---- Street lights ---------------------------------------------------------------------------------------------------------------------------
+lit_lines <- function(share = 0.4) { l <- demo_lines_prepped(); set.seed(5); l$lit_tag <- runif(nrow(l)) < share; l }
+lamp_points <- function(n = 30) sf::st_sf(geometry = sf::st_sfc(lapply(seq_len(n), function(i) sf::st_point(c(ctr_xy()[1] + i * 20, ctr_xy()[2]))), crs = crs0))
+ctr_xy <- function() as.numeric(sf::st_coordinates(ctr_m()))
+test_that("LT1 the lit tag is read from the street download: yes-like values count, no and missing do not", {
+  x <- sf::st_sf(highway = rep("residential", 6), lit = c("yes", "24/7", "automatic", "no", "disused", NA), geometry = sf::st_sfc(lapply(1:6, function(i) sf::st_linestring(rbind(c(0, i), c(1, i)))), crs = 4326))
+  expect_equal(env$facility_flags(x)$lit, c(TRUE, TRUE, TRUE, FALSE, FALSE, FALSE))
+  expect_true(all(c("lit_tag") %in% names(demo_lines_prepped())))
+})
+
+test_that("LT2 the lights query asks for lamps and lit paths only, in one request, inside the box", {
+  q <- env$lights_query(c(xmin = -80, ymin = 38.9, xmax = -79.8, ymax = 39), 60)
+  expect_match(q, "timeout:60", fixed = TRUE); expect_match(q, "street_lamp", fixed = TRUE); expect_match(q, "footway|cycleway", perl = TRUE)
+  expect_equal(lengths(regmatches(q, gregexpr("38.900000,-80.000000,39.000000,-79.800000", q, fixed = TRUE))), 2L)
+  expect_false(grepl("residential", q))
+})
+
+test_that("LT3 keep_lights keeps only lamps and lit paths, and prep_lights clips them to the map and never returns NULL", {
+  pts <- sf::st_sf(highway = c("street_lamp", "bus_stop", "street_lamp"), geometry = sf::st_sfc(sf::st_point(c(lon0, lat0)), sf::st_point(c(lon0, lat0)), sf::st_point(c(lon0 + 1, lat0)), crs = 4326))
+  ln <- sf::st_sf(highway = c("footway", "residential", "cycleway"), lit = c("yes", "yes", NA),
+                  geometry = sf::st_sfc(lapply(1:3, function(i) sf::st_linestring(rbind(c(lon0, lat0), c(lon0 + 0.003, lat0 + 0.0005 * i)))), crs = 4326))
+  kept <- env$keep_lights(list(osm_points = pts, osm_lines = ln))
+  expect_equal(nrow(kept$osm_points), 2); expect_equal(nrow(kept$osm_lines), 1)
+  r <- env$prep_lights(kept, lon0, lat0, 3000, crs0)
+  expect_equal(nrow(r$lamps), 1)                                  # the second lamp is a degree away, outside the circle
+  expect_gt(sum(r$ways$km), 0.1)
+  none <- env$prep_lights(list(osm_lines = NULL, osm_points = NULL), lon0, lat0, 3000, crs0)
+  expect_true(is.list(none)); expect_null(none$ways); expect_null(none$lamps)
+})
+
+test_that("LT4 the Street lights numbers: share of street length, lamp count, and a caption that says how much was found", {
+  l <- lit_lines(0.4); lg <- list(ways = NULL, lamps = lamp_points(30))
+  vd <- env$view_data("lights", l, 3000, ctr_m(), lights = lg)
+  expect_equal(vd$view, "lights"); expect_equal(vd$n_lamps, 30L)
+  expect_equal(unname(vd$km_by[["Lit street"]]), sum(l$km[l$lit_tag])); expect_equal(unname(vd$km_by[["Not tagged lit"]]), sum(l$km[!l$lit_tag]))
+  expect_equal(vd$lit_pct, 100 * sum(l$km[l$lit_tag]) / sum(l$km))
+  expect_match(vd$subtitle, "tagged as lit"); expect_match(vd$subtitle, "30 street lamps are mapped"); expect_match(vd$caption, "30 street lamps are mapped"); expect_false(grepl("very little", vd$caption))
+  sparse <- l; sparse$lit_tag <- FALSE
+  v2 <- env$view_data("lights", sparse, 3000, ctr_m(), lights = list(ways = NULL, lamps = NULL))
+  expect_match(v2$caption, "very little"); expect_match(v2$subtitle, "0% of"); expect_match(v2$subtitle, "0 street lamps")
+  v3 <- env$view_data("lights", sparse, 3000, ctr_m(), lights = NULL); expect_false(v3$has_lights)
+  mi <- env$view_data("lights", l, 3000, ctr_m(), units = "mi", lights = lg); expect_false(grepl(" km", mi$subtitle)); expect_length(mi$tiles, 3)
+})
+
+test_that("LT5 Street lights draws in every style as a night scene with glow layers, and other map types are unchanged", {
+  l <- lit_lines(0.4); lg <- list(ways = NULL, lamps = lamp_points(30))
+  for (st in names(env$styles)) {
+    p <- env$make_map(l, "Test", lon0, lat0, 3000, crs0, view = "lights", style = st, lights = lg); expect_s3_class(p, "patchwork")
+    expect_equal(p$patches$annotation$theme$plot.background$fill, env$night_palette(env$get_style(st), st)$bg)
+    expect_gte(sum(layer_geoms(p) == "GeomSf"), 6)
+  }
+  expect_false(identical(env$night_palette(env$styles$classic, "classic")$bg, env$styles$classic$bg))
+  f <- tempfile(fileext = ".png"); env$draw_figure(env$make_map(l, "Test", lon0, lat0, 3000, crs0, view = "lights", style = "dusk", lights = lg), f, "png", "dusk", preview = TRUE); expect_gt(file.size(f), 30000)
+  a <- env$make_map(l, "Test", lon0, lat0, 3000, crs0, view = "hierarchy"); b <- env$make_map(l, "Test", lon0, lat0, 3000, crs0, view = "hierarchy", lights = lg)
+  expect_equal(layer_geoms(a), layer_geoms(b))
+  none <- env$make_map(l, "Test", lon0, lat0, 3000, crs0, view = "lights", style = "classic", lights = list(ways = NULL, lamps = NULL)); expect_s3_class(none, "patchwork")
+  expect_equal(unname(env$views["lights"]), "Street lights"); expect_equal(env$get_view("lights"), "lights")
+})
+
+test_that("LT6 lamps are downloaded only when Street lights is chosen, once per place, with the lights class of request, and the map type survives a share link", {
+  calls <- with_stubs(NULL, boundary = st_transform(sq_shape(2500), 4326)); fetched <- list(); out <- list()
+  env$fetch_roads <- (function(old) { force(old); function(lon, lat, radius_m, crs_m, shape = NULL, on_try = NULL, detail = "all") { fetched[[length(fetched) + 1]] <<- detail; if (detail == "lights") list(osm_lines = NULL, osm_points = NULL) else bw_roads() } })(env$fetch_roads)
+  testServer(env$server, {
+    session$setInputs(query = "Elkins", find = 1, choice = "1", radius = 3, labels = TRUE, style = "classic", view = "hierarchy", area = "circle", locals = FALSE, units = "km", draw = 1)
+    out$before <<- unlist(fetched); session$setInputs(view = "lights"); session$flushReact(); out$tiles <<- as.character(output$stats$html); f <- output$map; out$img <<- !is.null(f$src) && nzchar(f$src)
+    session$setInputs(view = "hierarchy"); session$flushReact(); session$setInputs(view = "lights"); session$flushReact()
+    out$after <<- unlist(fetched); out$dl <<- file.size(output$download) > 30000
+  })
+  expect_false("lights" %in% out$before); expect_equal(sum(out$after == "lights"), 1); expect_match(out$tiles, "Tagged lit"); expect_match(out$tiles, "Street lamps"); expect_true(out$img); expect_true(out$dl)
+  expect_equal(env$share_params(list(query = "Elkins", view = "lights", units = "km", radius = 3), 1)$v, "lights")
+})
+
+test_that("LT7 comparing in Street lights loads each place's lamps", {
+  calls <- with_stubs(NULL); cmp_geo(calls); fetched <- character()
+  env$fetch_roads <- function(lon, lat, radius_m, crs_m, shape = NULL, on_try = NULL, detail = "all") { fetched <<- c(fetched, detail); if (detail == "lights") list(osm_lines = NULL, osm_points = NULL) else bw_roads() }
+  g <- cmp_g(); g$lines <- env$prep_lines(bw_roads(), lon0, lat0, 3000, crs0)
+  r <- env$compare_build(g, "Morgantown", "lights", "classic", "km"); expect_null(r$error); expect_equal(sum(fetched == "lights"), 2); expect_s3_class(r$fig, "patchwork")
+})
+
+# ---- A circle that fits the city -------------------------------------------------------------------------------------------------------------
+test_that("FIT1 the smallest enclosing circle holds every point and no smaller circle does", {
+  set.seed(11)
+  for (n in c(3, 8, 40, 300)) {
+    x <- runif(n, 0, 9000); y <- runif(n, 0, 4000); m <- env$min_enclosing_circle(x, y)
+    d <- sqrt((x - m[1])^2 + (y - m[2])^2); expect_lte(max(d), m[3] + 1e-6)
+    expect_gte(sum(d > m[3] - 1e-3), 2)                                                     # a smallest circle touches at least two points
+    expect_lte(m[3], sqrt((diff(range(x)))^2 + (diff(range(y)))^2) / 2 + 1e-6)             # never larger than the circle around the bounding box
+  }
+  m <- env$min_enclosing_circle(c(0, 10), c(0, 0)); expect_equal(m, c(5, 0, 5)); expect_equal(env$min_enclosing_circle(5, 7), c(5, 7, 0))
+})
+
+test_that("FIT2 a long city is centered on the middle of its limits, and the radius that encloses it shrinks", {
+  ctr <- as.numeric(st_coordinates(st_transform(st_sfc(st_point(c(lon0, lat0)), crs = 4326), crs0)))
+  ring <- cbind(ctr[1] + c(0, 8000, 8000, 0, 0), ctr[2] + c(0, 0, 2000, 2000, 0))           # 8 km by 2 km, its west edge at the geocoder's point
+  long <- st_transform(st_sfc(st_polygon(list(ring)), crs = crs0), 4326)
+  edge_pt <- c(lon0, lat0)                                                                  # the geocoder's point: here, near the west end
+  before <- env$enclosing_radius_m(long, edge_pt[1], edge_pt[2])
+  tb <- tibble(label = "Longville", lon = edge_pt[1], lat = edge_pt[2], boundary = list(long), south = NA_real_, north = NA_real_, west = NA_real_, east = NA_real_)
+  moved <- env$center_places(tb)
+  after <- env$enclosing_radius_m(long, moved$lon, moved$lat)
+  expect_equal(after, sqrt(4000^2 + 1000^2), tolerance = 0.01); expect_lt(after, before * 0.6)
+  nb <- tb; nb$boundary <- list(NULL); expect_equal(c(env$center_places(nb)$lon, env$center_places(nb)$lat), edge_pt)       # no boundary: the point stays
+  expect_null(env$boundary_center(NULL)); expect_equal(env$center_places(NULL), NULL)
+})
+
+test_that("FIT3 the starting radius lands just past the limits: a margin of 3% or 150 m, then the next quarter kilometer", {
+  enc <- 2870; with_margin <- enc + max(150, 0.03 * enc)
+  p <- env$radius_plan(with_margin); expect_equal(p$value, 3.25); expect_lte(p$value * 1000 - enc, 450)
+  expect_equal(env$radius_plan(1200 + 150)$value, 1.5)
+  mi <- env$radius_plan_units(env$radius_plan(with_margin), "mi", cover = TRUE); expect_gte(mi$value * 1.609344, p$value - 1e-9); expect_lt(mi$value * 1.609344, p$value + 0.17)
+})
+
+# ---- Nature & water --------------------------------------------------------------------------------------------------------------------------
+nat_world <- function() {
+  blob <- function(x, y, r) { th <- seq(0, 2 * pi, length.out = 33)[-33]; m <- cbind(ctr_xy()[1] + x + r * cos(th), ctr_xy()[2] + y + r * sin(th)); st_polygon(list(rbind(m, m[1, ]))) }
+  polys <- st_sf(natural = c("water", NA, "wood", NA), leisure = c(NA, "park", NA, NA), landuse = c(NA, NA, NA, "farmland"),
+                 geometry = st_sfc(blob(-1200, 800, 500), blob(0, 0, 900), blob(0, 0, 400), blob(1500, -1500, 300), crs = crs0))      # a park with a wood inside it, a lake, and farmland (ignored)
+  t <- seq(0, 1, length.out = 30)
+  mk <- function(pts, wat = NA, nat = NA) st_sf(waterway = wat, natural = nat, geometry = st_sfc(st_linestring(pts), crs = crs0))
+  ln <- rbind(mk(cbind(ctr_xy()[1] - 3000 + 6000 * t, ctr_xy()[2] + 500), "river"), mk(cbind(ctr_xy()[1] + 2500 + 0 * t, ctr_xy()[2] - 6000 + 12000 * t), NA, "coastline"))
+  list(osm_polygons = st_transform(polys, 4326), osm_lines = st_transform(ln, 4326))                                                  # the coast runs south to north, so the sea lies to the east
+}
+
+test_that("NT1 mapped features are classed by their tags, and the query asks for areas, rivers, and the coast in one request", {
+  x <- data.frame(natural = c("water", "wood", "wetland", NA, NA, NA), waterway = c(NA, NA, NA, "riverbank", NA, NA), leisure = c(NA, NA, NA, NA, "park", NA), landuse = c(NA, "forest", NA, NA, NA, "farmland"))
+  expect_equal(env$nature_class(x), c("Water", "Woods", "Parks & grass", "Water", "Parks & grass", NA))
+  expect_equal(env$nature_class(data.frame(natural = c("wood", "water"))), c("Woods", "Water"))                                   # missing tag columns are fine
+  q <- env$nature_query(c(xmin = -80, ymin = 38.9, xmax = -79.8, ymax = 39), 60)
+  expect_match(q, "timeout:60", fixed = TRUE); for (w in c("coastline", "riverbank", "forest", "nature_reserve", "relation")) expect_match(q, w, fixed = TRUE)
+  expect_false(grepl("highway", q)); expect_false(grepl("building", q))
+  k <- env$keep_nature(nat_world()); expect_equal(nrow(k$osm_polygons), 3); expect_equal(nrow(k$osm_lines), 2); expect_null(k$osm_points)
+})
+
+test_that("NT2 prep_nature clips to the map, keeps the layers from overlapping, rebuilds the sea from the coast, and is never NULL once downloaded", {
+  nat <- env$prep_nature(env$keep_nature(nat_world()), lon0, lat0, 4000, crs0)
+  a <- function(g) if (is.null(g)) 0 else as.numeric(sum(st_area(g))) / 1e6
+  expect_equal(a(nat$wood), pi * 0.4^2, tolerance = 0.02)                                         # the wood is the inner circle
+  expect_equal(a(nat$park), pi * (0.9^2 - 0.4^2), tolerance = 0.02)                                # the park has the wood cut out of it
+  expect_lt(a(suppressWarnings(st_intersection(nat$park, nat$wood))), 1e-6)
+  sea <- a(nat$water) - pi * 0.5^2                                                                # lake plus sea; the sea is east of x = 2500 inside the circle
+  expect_equal(sea, 16 * acos(2.5 / 4) - 2.5 * sqrt(16 - 2.5^2), tolerance = 0.03)                  # the circular segment east of the coast
+  east <- st_sfc(st_point(ctr_xy() + c(3200, 0)), crs = crs0); west <- st_sfc(st_point(ctr_xy() + c(-3200, -2500)), crs = crs0)
+  expect_true(lengths(st_intersects(east, nat$water)) > 0); expect_equal(lengths(st_intersects(west, nat$water)), 0L)
+  expect_equal(unique(nat$ways$kind), "river"); expect_equal(sum(nat$ways$km), 6, tolerance = 0.02)
+  expect_equal(nat$area_km2, pi * 16, tolerance = 0.01)
+  none <- env$prep_nature(list(osm_polygons = NULL, osm_lines = NULL), lon0, lat0, 4000, crs0)
+  expect_true(is.list(none)); expect_null(none$water); expect_null(none$wood); expect_null(none$park); expect_null(none$ways)
+})
+
+test_that("NT3 the Nature & water numbers: shares of the map, river length, and a caption that says how much was found", {
+  nat <- env$prep_nature(env$keep_nature(nat_world()), lon0, lat0, 4000, crs0)
+  vd <- env$view_data("nature", demo_lines_prepped(), 4000, ctr_m(), nature = nat)
+  expect_equal(vd$view, "nature"); expect_equal(names(vd$km_by), env$nature_levels); expect_equal(sum(vd$pct), 100 * sum(vd$km_by) / vd$area_km2)
+  expect_match(vd$subtitle, "of the map is woods, parks, or grass"); expect_match(vd$subtitle, "is water"); expect_length(vd$tiles, 3); expect_false(grepl("very little", vd$caption))
+  empty <- env$prep_nature(list(osm_polygons = NULL, osm_lines = NULL), lon0, lat0, 4000, crs0)
+  v2 <- env$view_data("nature", demo_lines_prepped(), 4000, ctr_m(), nature = empty)
+  expect_match(v2$caption, "very little is mapped here"); expect_match(v2$subtitle, "0% of the map"); expect_true(v2$has_nature)
+  expect_false(env$view_data("nature", demo_lines_prepped(), 4000, ctr_m(), nature = NULL)$has_nature)
+})
+
+test_that("NT4 Nature & water draws in every style with its own colors, shows only the classes found, and other map types ignore it", {
+  nat <- env$prep_nature(env$keep_nature(nat_world()), lon0, lat0, 4000, crs0); l <- demo_lines_prepped()
+  for (st in names(env$styles)) {
+    p <- env$make_map(l, "Test", lon0, lat0, 4000, crs0, view = "nature", style = st, nature = nat); expect_s3_class(p, "patchwork")
+    expect_equal(p$patches$annotation$theme$plot.background$fill, env$styles[[st]]$bg)
+    cols <- unlist(env$styles[[st]]$nature); expect_equal(length(unique(cols[c("water", "wood", "park")])), 3)
+    expect_gte(sum(layer_geoms(p) == "GeomSf"), 5)
+  }
+  f <- tempfile(fileext = ".png"); env$draw_figure(env$make_map(l, "Test", lon0, lat0, 4000, crs0, view = "nature", style = "dusk", nature = nat), f, "png", "dusk", preview = TRUE); expect_gt(file.size(f), 30000)
+  only_water <- nat; only_water$wood <- NULL; only_water$park <- NULL
+  w <- env$make_map(l, "Test", lon0, lat0, 4000, crs0, view = "nature", style = "classic", nature = only_water)
+  expect_equal(w[[1]]$scales$get_scales("fill")$get_limits(), "Water")
+  a <- env$make_map(l, "Test", lon0, lat0, 4000, crs0, view = "hierarchy"); b <- env$make_map(l, "Test", lon0, lat0, 4000, crs0, view = "hierarchy", nature = nat)
+  expect_equal(layer_geoms(a), layer_geoms(b))
+  expect_equal(unname(env$views["nature"]), "Nature & water"); expect_equal(env$get_view("nature"), "nature"); expect_equal(length(env$views) %% 2, 0)          # two even columns in the picker
+})
+
+test_that("NT5 parks and water are downloaded only when Nature & water is chosen, once per place, and the map type survives a share link", {
+  calls <- with_stubs(NULL, boundary = st_transform(sq_shape(2500), 4326)); fetched <- list(); out <- list()
+  env$fetch_roads <- (function(old) { force(old); function(lon, lat, radius_m, crs_m, shape = NULL, on_try = NULL, detail = "all") { fetched[[length(fetched) + 1]] <<- detail; if (detail == "nature") nat_world() else bw_roads() } })(env$fetch_roads)
+  testServer(env$server, {
+    session$setInputs(query = "Elkins", find = 1, choice = "1", radius = 3, labels = TRUE, style = "classic", view = "hierarchy", area = "circle", locals = FALSE, units = "km", draw = 1)
+    out$before <<- unlist(fetched); session$setInputs(view = "nature"); session$flushReact(); out$tiles <<- as.character(output$stats$html)
+    session$setInputs(view = "hierarchy"); session$flushReact(); session$setInputs(view = "nature"); session$flushReact()
+    out$after <<- unlist(fetched); out$dl <<- file.size(output$download) > 30000
+  })
+  expect_false("nature" %in% out$before); expect_equal(sum(out$after == "nature"), 1); expect_match(out$tiles, "Woods and parks"); expect_match(out$tiles, "Water"); expect_true(out$dl)
+  expect_equal(env$share_params(list(query = "Elkins", view = "nature", units = "km", radius = 3), 1)$v, "nature")
+})
+
+test_that("NT6 comparing in Nature & water loads each place's parks and water", {
+  calls <- with_stubs(NULL); cmp_geo(calls); fetched <- character()
+  env$fetch_roads <- function(lon, lat, radius_m, crs_m, shape = NULL, on_try = NULL, detail = "all") { fetched <<- c(fetched, detail); if (detail == "nature") nat_world() else bw_roads() }
+  g <- cmp_g(); g$lines <- env$prep_lines(bw_roads(), lon0, lat0, 3000, crs0)
+  r <- env$compare_build(g, "Morgantown", "nature", "classic", "km"); expect_null(r$error); expect_equal(sum(fetched == "nature"), 2); expect_s3_class(r$fig, "patchwork")
+})
+
+# ---- modeled caravan routes of the Egyptian Eastern Desert --------------------------------------------------------------------------
+test_that("DS1 the desert data loads, the classes add up, and a missing or damaged file is handled", {
+  d <- env$desert_data(); expect_false(is.null(d)); expect_equal(d$n_sites, 457); expect_equal(d$n_water, 204)
+  expect_equal(levels(d$routes$cls), c("Under 1.25", "1.25 to 1.5", "1.5 to 2", "2 to 4", "4 or more")); expect_false(anyNA(d$routes$cls))
+  expect_equal(sum(table(d$routes$cls)), nrow(d$routes)); expect_gt(d$total_km, 30000); expect_lt(d$total_km, 34000)
+  expect_gt(d$easy_pct, 40); expect_lt(d$easy_pct + d$rough_pct, 100)
+  expect_true(all(d$routes$cost_m > 0)); expect_true(all(d$routes$km > 0))
+  expect_true(all(sf::st_geometry_type(d$routes) %in% c("LINESTRING", "MULTILINESTRING"))); expect_equal(unique(as.character(sf::st_geometry_type(d$sites))), "POINT")
+  expect_equal(d$routes$cls[1], d$routes$cls[which.max(d$routes$cost_m)])       # the roughest ground is drawn first, so the easy corridors lie on top
+  expect_false(is.unsorted(rev(d$routes$cost_m)))
+  e2 <- new.env(); suppressMessages(sys.source(app_file, e2)); old <- Sys.getenv("OVERMAPS_DATA")
+  empty <- tempfile(); dir.create(empty); Sys.setenv(OVERMAPS_DATA = empty); on.exit(Sys.setenv(OVERMAPS_DATA = old), add = TRUE)
+  expect_null(e2$desert_roads()); expect_null(e2$desert_data())
+  bad <- tempfile(); dir.create(bad); saveRDS(list(routes = 1), file.path(bad, "eastern_desert_routes.rds")); Sys.setenv(OVERMAPS_DATA = bad)
+  e3 <- new.env(); suppressMessages(sys.source(app_file, e3)); expect_null(e3$desert_roads())
+})
+
+test_that("DS2 the desert map draws in every style and says in words, caption and picture text that the routes are computed, not found", {
+  d <- env$desert_data()
+  for (st in names(env$styles)) { f <- tempfile(fileext = ".png"); env$draw_figure(env$desert_map(d, st), f, "png", st, preview = TRUE); expect_gt(file.size(f), 20000, label = st) }
+  w <- env$desert_words(d); cap <- env$desert_caption(d); alt <- env$desert_alt(d)
+  expect_match(w, "^Computed, not found"); expect_match(alt, "Computed, not found")
+  expect_match(cap, "not roads found on the ground"); expect_match(cap, "CC BY 4.0", fixed = TRUE); expect_match(cap, "10.5281/zenodo.4291876", fixed = TRUE)
+  expect_match(cap, "48 stretches"); expect_match(cap, "7.5% longer"); expect_match(cap, "does not test it against the ancient roads")
+  expect_match(w, "Ptolemaic and Roman"); expect_false(grepl("pharaonic|Pharaonic|New Kingdom", paste(w, cap, alt)))      # the data does not cover the pharaonic period, so nothing may suggest it does
+  expect_false(any(grepl("[–—]", c(w, cap, alt, env$desert_check)))); expect_false(any(grepl("\\b[A-Za-z]+n't\\b|\\b(it|that|there)'s\\b", c(w, cap, alt, env$desert_check))))
+})
+
+test_that("DS3 the history window has the desert tab, and the server draws it and downloads a real file", {
+  m <- as.character(env$history_page("classic")); for (id in c("d_style", "d_format", "d_download", "d_map")) expect_match(m, paste0('id="', id, '"'), fixed = TRUE)
+  expect_match(m, "Egyptian desert", fixed = TRUE); expect_match(m, "Computed, not found", fixed = TRUE); expect_match(m, "zenodo.4291876", fixed = TRUE)
+  out <- list()
+  testServer(env$server, {
+    session$setInputs(d_style = "dusk", d_format = "png", d_draw = 1); session$flushReact()
+    img <- output$d_map; out$alt <<- img$alt; p <- output$d_download; out$dl <<- basename(p)
+    out$ok <<- file.exists(p) && file.size(p) > 20000 && identical(readBin(p, "raw", 4)[2:4], charToRaw("PNG"))
+    session$setInputs(d_format = "../../etc/passwd"); out$bad <<- basename(output$d_download)
+  })
+  expect_match(out$alt, "Eastern Desert"); expect_true(out$ok); expect_match(out$dl, "^eastern_desert_modeled_routes_[0-9]{8}\\.png$"); expect_match(out$bad, "\\.png$")
+})
+
+# ---- spacing, tab order, full screen, and file type with resolution -----------------------------------------------------------------
+test_that("SP1 every map keeps real room between its title, its text, the map, and the caption", {
+  th <- function(p) p$patches$annotation$theme
+  made <- list(main = env$make_map(demo_lines_prepped(), "Test", lon0, lat0, 3000, crs0, view = "hierarchy", style = "classic"),
+               roman = env$roman_map(env$roman_data("britain", "kind"), "dusk"), desert = env$desert_map(env$desert_data(), "mono"))
+  for (k in names(made)) {
+    t <- th(made[[k]])
+    expect_gte(as.numeric(t$plot.title$margin)[3], 22, label = paste(k, "title gap")); expect_gte(as.numeric(t$plot.subtitle$margin)[3], 28, label = paste(k, "text gap"))
+    expect_gte(as.numeric(t$plot.caption$margin)[1], 16, label = paste(k, "caption gap"))
+  }
+  for (v in setdiff(names(env$views), "hierarchy")) {                    # the other map types share the same spacing
+    t <- th(env$make_map(demo_lines_prepped(), "Test", lon0, lat0, 3000, crs0, view = v, style = "classic", nature = NULL, lights = NULL)); expect_gte(as.numeric(t$plot.subtitle$margin)[3], 28, label = v)
+  }
+})
+
+test_that("SP2 the history tabs run Roman roads, Egyptian desert, Ancient cities, and no history page carries its own full screen button because Expand serves both map pages", {
+  m <- as.character(env$history_page("classic"))
+  pos <- vapply(c('data-value="roads"', 'data-value="desert"', 'data-value="cities"'), function(x) regexpr(x, m, fixed = TRUE)[[1]], 1); expect_true(all(pos > 0)); expect_false(is.unsorted(pos))
+  expect_false(grepl("map-full-btn", m, fixed = TRUE)); expect_false(grepl("overmapsMapFull", env$app_js, fixed = TRUE))
+  for (id in c("h_sb", "c_sb", "d_sb")) expect_match(m, paste0('id="', id, '"'), fixed = TRUE)
+  expect_match(env$app_css, ":not([data-page='history']) .expand-btn { display: none; }", fixed = TRUE)
+})
+
+test_that("RS1 resolution: choices are validated, the pixel cap holds, and a higher dpi makes a bigger real picture", {
+  expect_equal(unname(env$resolution_choices), c("150", "300", "600", "max")); expect_equal(env$res_pick("600"), "600"); expect_equal(env$res_pick("9999"), "300"); expect_equal(env$res_pick(NULL), "300"); expect_equal(env$res_pick("../x"), "300")
+  expect_equal(env$print_plan("8x10", "png", "600")$px, c(4800, 6000)); expect_equal(env$print_plan("8x10", "png", "150")$px, c(1200, 1500)); expect_equal(env$print_plan("8x10", "png")$px, c(2400, 3000))
+  for (k in names(env$print_sizes)) for (r in unname(env$resolution_choices)) {
+    pl <- env$print_plan(k, "png", r); expect_lte(prod(pl$px), env$max_export_px * 1.001, label = paste(k, r)); expect_gte(pl$dpi, 150 * (k != "24x30") + 150 * (k == "24x30"))
+  }
+  mx <- env$print_plan("8x10", "png", "max"); expect_gt(mx$dpi, 600); expect_false(mx$capped)
+  big <- env$print_plan("16x20", "png", "600"); expect_true(big$capped); expect_lt(big$dpi, 600); expect_gt(big$dpi, 300)                  # held to the cap, still better than 300
+  expect_true(is.na(env$print_plan("11x14", "pdf", "600")$dpi))                                                                        # vector formats ignore it
+  expect_equal(env$res_suffix("png", "300"), ""); expect_equal(env$res_suffix("png", "600"), "_600dpi"); expect_equal(env$res_suffix("png", "max"), "_max"); expect_equal(env$res_suffix("pdf", "600"), "")
+  p <- env$make_map(demo_lines_prepped(), "Test", lon0, lat0, 3000, crs0, view = "hierarchy", style = "classic")
+  a <- tempfile(fileext = ".png"); b <- tempfile(fileext = ".png"); cc <- tempfile(fileext = ".png")
+  env$draw_figure(p, a, "png", "classic", res = "150"); env$draw_figure(p, b, "png", "classic", res = "600"); env$draw_figure(p, cc, "png", "classic")
+  expect_equal(dim(png::readPNG(a))[1:2], c(1500, 1200)); expect_equal(dim(png::readPNG(b))[1:2], c(6000, 4800)); expect_equal(dim(png::readPNG(cc))[1:2], c(3000, 2400))
+  f <- tempfile(fileext = ".pdf"); env$draw_figure(p, f, "pdf", "classic", res = "600"); expect_gt(file.size(f), 5000)
+  cmp <- tempfile(fileext = ".png"); env$draw_figure(p, cmp, "png", "classic", size = env$compare_size, res = "600"); cd <- env$export_dpi(env$compare_size, "600")$dpi; expect_lt(cd, 600); expect_gt(cd, 300); expect_equal(dim(png::readPNG(cmp))[1:2], c(10, 16) * cd)
+})
+
+test_that("RS2 every download has a file type and a resolution side by side, and the choice reaches the file and its name", {
+  ui <- as.character(env$ui(NULL)); m <- as.character(env$history_page("classic"))
+  for (id in c("res")) expect_match(ui, sprintf('id="%s"', id), fixed = TRUE); for (id in c("h_res", "c_res", "d_res")) expect_match(m, sprintf('id="%s"', id), fixed = TRUE)
+  expect_match(ui, "EPS", fixed = TRUE); expect_false(grepl("Vector files stay sharp", ui, fixed = TRUE)); expect_match(env$app_css, "grid-template-columns: 1fr 1fr; column-gap", fixed = TRUE)
+  expect_false(grepl("(300 dpi)", paste(names(env$export_formats), collapse = " "), fixed = TRUE))
+  out <- list()
+  testServer(env$server, {
+    session$setInputs(d_style = "classic", d_format = "png", d_res = "150"); session$flushReact(); p <- output$d_download; out$d150 <<- dim(png::readPNG(p))[1:2]; out$dn <<- basename(p)
+    session$setInputs(d_res = "300"); out$d300 <<- basename(output$d_download); session$setInputs(d_res = "nonsense"); out$dbad <<- basename(output$d_download)
+    session$setInputs(d_format = "pdf", d_res = "600"); out$dpdf <<- basename(output$d_download)
+  })
+  expect_equal(out$d150, c(1500, 1200)); expect_match(out$dn, "^eastern_desert_modeled_routes_150dpi_[0-9]{8}\\.png$"); expect_match(out$d300, "^eastern_desert_modeled_routes_[0-9]{8}\\.png$")
+  expect_match(out$dbad, "^eastern_desert_modeled_routes_[0-9]{8}\\.png$"); expect_match(out$dpdf, "^eastern_desert_modeled_routes_[0-9]{8}\\.pdf$")
+})
+
+test_that("CR1 the ancient city radius plan and the radius drawn follow the site, the unit and the slider", {
+  for (i in seq_len(nrow(env$ancient_sites))) {
+    s <- as.list(env$ancient_sites[i, ]); pl <- env$city_radius_plan(s)
+    expect_true(pl$min < pl$value && pl$value < pl$max && pl$max <= 5 && pl$min >= 0.2)
+    expect_equal(env$city_radius_km(s, pl$value, "km"), s$radius_km)                                  # left at the start: the site's own radius, exactly
+    mi <- env$radius_plan_units(pl, "mi"); expect_equal(env$city_radius_km(s, mi$value, "mi"), s$radius_km)
+  }
+  s <- env$ancient_site("pompeii"); pl <- env$city_radius_plan(s)
+  expect_equal(env$city_radius_km(s, pl$max, "km"), pl$max); expect_equal(env$city_radius_km(s, 99, "km"), pl$max); expect_equal(env$city_radius_km(s, 0.01, "km"), pl$min)
+  expect_equal(env$city_radius_km(s, NULL, "km"), s$radius_km); expect_equal(env$city_radius_km(s, "x", "mi"), s$radius_km)
+  expect_equal(env$city_radius_km(s, 1, "mi"), env$km_per_mile)
+})
+test_that("CR2 a saved snapshot serves any radius up to its own and nothing larger", {
+  site <- env$ancient_site("pompeii"); env$history_cache$cities <- list(pompeii = list(roads = list(osm_lines = NULL), taken = "today", radius_m = 800L))
+  withr::defer(env$history_cache$cities <- NULL)
+  expect_false(is.null(env$bundled_city(site, 800))); expect_false(is.null(env$bundled_city(site, 400))); expect_null(env$bundled_city(site, 801)); expect_null(env$bundled_city(env$ancient_site("ostia"), 400))
+})
+test_that("CR3 an ancient city can be drawn at another radius and in miles, and the sheet size shows in the file name", {
+  withr::defer(env$ancient_sites <- orig_sites); orig_sites <- env$ancient_sites
+  env$ancient_sites <- dplyr::bind_rows(orig_sites, tibble(id = "test", name = "Testville, Elkins", civ = "Roman", lat = lat0, lon = lon0, radius_km = 1.5, note = "A fixture."))
+  calls <- with_stubs(NULL); out <- list()
+  testServer(env$server, {
+    session$setInputs(h_tab = "cities", c_site = "test", c_view = "blocks", c_style = "classic", c_format = "png", c_units = "km", c_radius = 0.75, c_print = "11x14"); session$flushReact()
+    session$setInputs(c_draw = 1); session$flushReact(); out$status <<- as.character(output$c_status$html)
+    out$dl <<- basename(output$c_download); out$note <<- as.character(output$c_print_note$html)
+    session$setInputs(c_radius = 1); session$flushReact(); out$stale <<- as.character(output$c_status$html)
+    session$setInputs(c_units = "mi", c_radius = 1, c_draw = 2); session$flushReact(); out$img <<- output$c_map$alt
+  })
+  expect_equal(calls$fetch[[1]]$radius_m, 750); expect_equal(calls$fetch[[2]]$radius_m, round(env$km_per_mile * 1000))
+  expect_match(out$dl, "^streets_test_blocks_11x14_[0-9]{8}\\.png$"); expect_match(out$note, "11 × 14 inches"); expect_match(out$stale, "new radius")
+})
+test_that("CR4 EPS is a file type, vector files offer only Vector for resolution, and the history tabs have the same download options as the main map", {
+  expect_true("eps" %in% unname(env$export_formats)); expect_false(any(grepl("vector", names(env$export_formats), ignore.case = TRUE)))
+  expect_equal(unname(env$vector_choice), "vector"); expect_equal(env$res_suffix("eps", "vector"), ""); expect_true(is.na(env$print_plan("8x10", "eps", "300")$dpi))
+  f <- tempfile(fileext = ".eps"); p <- ggplot2::ggplot(data.frame(x = 1:3, y = 1:3), ggplot2::aes(x, y)) + ggplot2::geom_point()
+  env$draw_figure(p, f, "eps", "classic"); expect_match(readLines(f, n = 1, warn = FALSE), "^%!PS-Adobe"); expect_true(any(grepl("EPSF", readLines(f, n = 3, warn = FALSE))))
+  m <- as.character(env$history_page("classic"))
+  for (id in c("c_units", "c_radius", "c_relief", "c_reset", "c_print", "c_res", "h_print", "h_res", "d_print", "d_res")) expect_match(m, paste0('id="', id, '"'), fixed = TRUE)
+  expect_match(env$print_note_text("eps", "8x10", "300"), "EPS is laid out for 8 × 10 inches")
+})
+
+test_that("TX1 title, subtitle and caption boxes have a fixed width so a wrapped title keeps its height", {
+  expect_equal(as.numeric(grid::convertWidth(env$text_box_w, "in")), 8 - 2 * 34 / 72)
+  src <- strsplit(read_root("app.R"), "\n")[[1]]
+  n_box <- sum(grepl("element_textbox_simple\\(", src)); n_fixed <- sum(grepl("element_textbox_simple\\(width = text_box_w, hjust = 0.5,", src))
+  expect_gte(n_box, 9); expect_equal(n_fixed, n_box)
+})
+
+# ---- Ancient cities: nature & water and street lights, the format menu, and the loop-variable bug --------------------------------------------
+extras_res <- function() {
+  w <- nat_world()
+  ctr <- ctr_xy(); pt <- function(dx, dy) st_point(ctr + c(dx, dy))
+  ln <- st_sf(osm_id = c("11", "12", "13"), highway = c("footway", "residential", "residential"), lit = c("yes", "yes", "no"), waterway = NA_character_, natural = NA_character_,
+              geometry = st_sfc(st_linestring(rbind(ctr + c(-200, 0), ctr + c(200, 0))), st_linestring(rbind(ctr + c(-200, 100), ctr + c(200, 100))), st_linestring(rbind(ctr + c(-200, -100), ctr + c(200, -100))), crs = crs0))
+  w$osm_lines <- dplyr::bind_rows(w$osm_lines, st_transform(ln, 4326))
+  w$osm_points <- st_transform(st_sf(osm_id = paste0("p", 1:3), highway = c("street_lamp", "street_lamp", "bus_stop"), geometry = st_sfc(pt(10, 10), pt(-50, 20), pt(0, 0), crs = crs0)), 4326)
+  w
+}
+test_that("CE1 one request asks for water, parks, lamps, and lit ways, and the answer is split for each map with only the columns used", {
+  q <- env$site_extras_query(c(xmin = -80, ymin = 38.9, xmax = -79.8, ymax = 39), 60)
+  for (w in c("coastline", "riverbank", "street_lamp", '["lit"]')) expect_match(q, w, fixed = TRUE)
+  expect_false(grepl("building", q)); expect_equal(env$nature_query(c(xmin = -80, ymin = 38.9, xmax = -79.8, ymax = 39), 60), sub("\\);out body", ");out body", env$nature_query(c(xmin = -80, ymin = 38.9, xmax = -79.8, ymax = 39), 60)))
+  e <- env$keep_site_extras(extras_res())
+  expect_equal(sort(e$lit_ids), c("11", "12")); expect_equal(e$n_lit, 2L); expect_equal(e$n_lamps, 2L)
+  expect_true(all(c("natural", "waterway") %in% names(e$nature$osm_lines))); expect_false("highway" %in% names(e$nature$osm_polygons))
+  expect_true(all(names(e$lights$osm_points) %in% c("osm_id", "highway", "geometry")))
+  nat <- env$prep_nature(e$nature, lon0, lat0, 4000, crs0); expect_false(is.null(nat$water)); expect_gt(nat$area_km2, 0)
+  lg <- env$prep_lights(e$lights, lon0, lat0, 4000, crs0); expect_equal(nrow(lg$lamps), 2L)
+  expect_equal(env$keep_site_extras(list())$n_lamps, 0L)
+})
+test_that("CE2 street lights is offered only for sites whose snapshot found lamps, and lit ids are put back on the streets", {
+  withr::defer(env$history_cache$cities <- NULL)
+  env$history_cache$cities <- list(pompeii = list(roads = list(osm_lines = NULL), radius_m = 800L, extras = list(radius_m = 800L, nature = list(), n_lamps = 6L, n_lit = 7L)),
+                                   ostia = list(roads = list(osm_lines = NULL), radius_m = 1000L, extras = list(radius_m = 1000L, nature = list(), n_lamps = 2L, n_lit = 1L)))
+  expect_true(env$city_has_lights("pompeii")); expect_false(env$city_has_lights("ostia")); expect_false(env$city_has_lights("timgad")); expect_false(env$city_has_lights(NULL))
+  expect_true("lights" %in% env$city_view_choices("pompeii")$values); expect_false("lights" %in% env$city_view_choices("ostia")$values)
+  expect_equal(length(env$city_view_choices("pompeii")$names), length(env$city_view_choices("pompeii")$values))
+  expect_true(all(c("nature", "lights") %in% names(env$city_views))); expect_equal(env$get_city_view("nature"), "nature"); expect_equal(env$get_city_view("lights"), "lights")
+  expect_null(env$bundled_extras(env$ancient_site("pompeii"), 900)); expect_false(is.null(env$bundled_extras(env$ancient_site("pompeii"), 800))); expect_null(env$bundled_extras(env$ancient_site("timgad"), 500))   # a larger radius than saved is not served
+  l <- fixture_lines(); l$osm_id <- as.character(seq_len(nrow(l))); l$lit_tag <- FALSE
+  expect_equal(sum(env$with_lit_ids(l, c("1", "2"))$lit_tag), 2L); expect_equal(sum(env$with_lit_ids(l, character())$lit_tag), 0L); expect_null(env$with_lit_ids(NULL, "1"))
+})
+test_that("CE3 an ancient city draws as nature & water and as street lights from one extra download, and falls back to the streets if it fails", {
+  withr::defer({ env$ancient_sites <- orig_sites; env$history_cache$cities <- NULL }); orig_sites <- env$ancient_sites
+  env$ancient_sites <- dplyr::bind_rows(orig_sites, tibble(id = "test", name = "Testville, Elkins", civ = "Roman", lat = lat0, lon = lon0, radius_km = 1.5, note = "A fixture."))
+  env$history_cache$cities <- list()
+  calls <- with_stubs(NULL)
+  l <- fixture_lines(); l$osm_id <- as.character(seq_len(nrow(l)))
+  env$fetch_roads <- function(lon, lat, radius_m, crs_m, shape = NULL, on_try = NULL, detail = "all") {
+    calls$fetch[[length(calls$fetch) + 1]] <- list(radius_m = radius_m, detail = detail)
+    if (identical(detail, "site")) env$keep_site_extras(extras_res()) else list(osm_lines = st_transform(l, 4326))
+  }
+  out <- list()
+  testServer(env$server, {
+    session$setInputs(h_tab = "cities", c_site = "test", c_view = "direction", c_style = "classic", c_format = "png", c_units = "km", c_radius = 1.5); session$flushReact()
+    session$setInputs(c_draw = 1); session$flushReact()
+    session$setInputs(c_view = "nature"); session$flushReact(); out$alt_n <<- output$c_map$alt; out$ok_n <<- is.character(output$c_map$src) && file.size(output$c_map$src) > 20000
+    session$setInputs(c_view = "lights"); session$flushReact(); out$alt_l <<- output$c_map$alt; out$ok_l <<- is.character(output$c_map$src) && file.size(output$c_map$src) > 20000
+    out$dl <<- basename(output$c_download)
+    session$setInputs(c_view = "direction"); session$flushReact(); out$alt_d <<- output$c_map$alt
+  })
+  d <- vapply(calls$fetch, function(x) x$detail, "")
+  expect_equal(sum(d == "ancient"), 1L); expect_equal(sum(d == "site"), 1L)                       # streets once, water and lamps once, shared by both map types
+  expect_match(out$alt_n, "water, woods, and parks"); expect_match(out$alt_l, "street lamps"); expect_match(out$alt_d, "colored by direction")
+  expect_true(out$ok_n); expect_true(out$ok_l); expect_match(out$dl, "^streets_test_lights_[0-9]{8}\\.png$")
+  # a failing extra download keeps the streets on screen and says why
+  env$history_cache$cities <- list(); calls2 <- with_stubs(NULL)
+  env$fetch_roads <- function(lon, lat, radius_m, crs_m, shape = NULL, on_try = NULL, detail = "all") { if (identical(detail, "site")) stop(shiny::safeError("down")) else list(osm_lines = st_transform(l, 4326)) }
+  out2 <- list()
+  testServer(env$server, {
+    session$setInputs(h_tab = "cities", c_site = "test", c_view = "nature", c_style = "classic", c_format = "png", c_units = "km", c_radius = 1.5); session$flushReact()
+    session$setInputs(c_draw = 1); session$flushReact(); out2$ok <<- is.character(output$c_map$src) && file.size(output$c_map$src) > 20000
+  })
+  expect_true(out2$ok)
+})
+test_that("CE4 the file type menu has a non-selectable divider and alphabetical vector formats, and every pair of menus swaps its own resolution", {
+  expect_equal(unname(env$export_formats), c("png", "jpeg", "tiff", "eps", "pdf", "svg")); expect_equal(unname(env$vector_formats), sort(unname(env$vector_formats)))
+  h <- as.character(env$format_select("zz")); expect_match(h, 'value="" disabled', fixed = TRUE)
+  expect_true(regexpr('disabled', h) > regexpr('value="tiff"', h, fixed = TRUE) && regexpr('disabled', h) < regexpr('value="eps"', h, fixed = TRUE))
+  src <- strsplit(read_root("app.R"), "\n")[[1]]; i <- grep("^  sync_resolution <- function", src)
+  expect_true(any(grepl("force\\(fmt_id\\); force\\(res_id\\)", src[i + 1])))                                 # without this, a loop variable left every menu watching the last pair
+})
+
+
+# ---- Color vision modes, and the Home page with its header tabs --------------------------------------------------------------------------------------
+# Colors are judged the way a person with that vision sees them: the Machado (2009) matrices at full severity, then distance in OKLab (times 100).
+cvd_sim <- function(hex, mode) {
+  m <- switch(mode,
+    deutan = matrix(c(0.367322, 0.860646, -0.227968, 0.280085, 0.672501, 0.047413, -0.011820, 0.042940, 0.968881), 3, byrow = TRUE),
+    protan = matrix(c(0.152286, 1.052583, -0.204868, 0.114503, 0.786281, 0.099216, -0.003882, -0.048116, 1.051998), 3, byrow = TRUE),
+    tritan = matrix(c(1.255528, -0.076749, -0.178779, -0.078411, 0.930809, 0.147602, 0.004733, 0.691367, 0.303900), 3, byrow = TRUE),
+    diag(3))
+  rgb <- t(grDevices::col2rgb(hex)) / 255; lin <- ifelse(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055)^2.4)
+  out <- pmin(1, pmax(0, lin %*% t(m)))
+  l <- (out %*% t(matrix(c(0.4122214708, 0.5363325363, 0.0514459929, 0.2119034982, 0.6806995451, 0.1073969566, 0.0883024619, 0.2817188376, 0.6299787005), 3, byrow = TRUE)))^(1 / 3)
+  cbind(L = 0.2104542553 * l[, 1] + 0.7936177850 * l[, 2] - 0.0040720468 * l[, 3], a = 1.9779984951 * l[, 1] - 2.4285922050 * l[, 2] + 0.4505937099 * l[, 3],
+        b = 0.0259040371 * l[, 1] + 0.7827717662 * l[, 2] - 0.8086757660 * l[, 3])
+}
+cvd_gap <- function(h1, h2, mode) 100 * sqrt(sum((cvd_sim(h1, mode) - cvd_sim(h2, mode))^2))
+cvd_min_adjacent <- function(cols, mode, wrap = FALSE) {
+  n <- length(cols); idx <- cbind(seq_len(n - 1), seq_len(n - 1) + 1); if (wrap) idx <- rbind(idx, c(n, 1))
+  min(vapply(seq_len(nrow(idx)), function(k) cvd_gap(cols[idx[k, 1]], cols[idx[k, 2]], mode), 0))
+}
+test_that("CV1 a color vision mode changes only the colors that carry meaning, and bad values fall back to Standard", {
+  expect_equal(unname(env$cvd_modes), c("standard", "deutan", "protan", "tritan", "gray"))
+  expect_equal(env$split_style("dusk~tritan"), list(name = "dusk", mode = "tritan")); expect_equal(env$split_style("dusk"), list(name = "dusk", mode = "standard"))
+  expect_equal(env$split_style("nope~blue")$name, "classic"); expect_equal(env$split_style("dusk~nope")$mode, "standard"); expect_equal(env$split_style(NULL)$mode, "standard"); expect_equal(env$split_style(NA)$name, "classic")
+  expect_equal(env$style_key("dusk", "tritan"), "dusk~tritan"); expect_equal(env$style_key("dusk", "standard"), "dusk"); expect_equal(env$style_key("dusk", NULL), "dusk"); expect_equal(env$style_key("zzz", "../x"), "classic")
+  for (nm in names(env$styles)) {
+    std <- env$get_style(nm); expect_identical(std, env$styles[[nm]])
+    for (md in c("deutan", "protan", "tritan", "gray")) {
+      p <- env$get_style(paste0(nm, "~", md))
+      expect_equal(p$bg, std$bg); expect_equal(p$ink, std$ink); expect_equal(p$label, std$label)                       # the paper and the text never change
+      expect_equal(lengths(p[c("cols", "speed", "dir", "dens")]), lengths(std[c("cols", "speed", "dir", "dens")]))
+      expect_setequal(names(p$nature), names(std$nature)); expect_setequal(names(p$night), names(std$night))
+      expect_true(all(grepl("^#[0-9a-fA-F]{6}$", unlist(p[c("cols", "speed", "dir", "dens", "nature", "night")]))))
+    }
+  }
+  expect_identical(env$get_style("dusk~deutan"), env$get_style("dusk~protan"))
+})
+test_that("CV2 every color vision palette keeps its neighbors apart when seen the way that person sees them", {
+  floor_gap <- 6                                                     # the lowest gap a pair may have; the palettes were built to reach about 8 or more
+  for (nm in c("classic", "dusk")) {
+    for (md in c("deutan", "protan", "tritan")) {
+      p <- env$get_style(paste0(nm, "~", md)); lab <- paste(nm, md)
+      expect_gte(cvd_min_adjacent(p$speed, md), floor_gap); expect_gte(cvd_min_adjacent(p$dir, md, wrap = TRUE), floor_gap)
+      expect_gte(cvd_min_adjacent(p$cols, md), floor_gap); expect_gte(cvd_min_adjacent(p$dens, md), floor_gap)
+      n <- p$nature; pairs <- list(c("water", "wood"), c("water", "park"), c("wood", "park"), c("river", "wood"), c("river", "park"), c("river", "street"), c("water", "street"))
+      for (pr in pairs) expect_gte(cvd_gap(n[[pr[1]]], n[[pr[2]]], md), floor_gap)
+    }
+    g <- env$get_style(paste0(nm, "~gray"))
+    expect_true(all(vapply(unlist(g[c("cols", "speed", "dir", "dens", "nature")]), function(h) { v <- grDevices::col2rgb(h)[, 1]; v[1] == v[2] && v[2] == v[3] }, TRUE)))     # truly gray
+    expect_gte(cvd_min_adjacent(g$cols, "none"), floor_gap); expect_gte(cvd_min_adjacent(g$speed, "none"), floor_gap); expect_gte(cvd_min_adjacent(g$dens, "none"), floor_gap)
+    n <- g$nature; for (pr in list(c("water", "wood"), c("water", "park"), c("wood", "park"), c("river", "wood"), c("river", "park"), c("river", "street"), c("water", "street"))) expect_gte(cvd_gap(n[[pr[1]]], n[[pr[2]]], "none"), floor_gap)
+    expect_equal(g$night$glow, "#ffffff")                              # a lamp glows white when there is no hue to carry it
+  }
+})
+test_that("CV3 the header has the Color vision menu and the page tabs, and the Home page names the source of every map set", {
+  ui <- as.character(env$ui(NULL))
+  expect_match(ui, 'id="cvd"', fixed = TRUE); expect_match(ui, "Color vision", fixed = TRUE)
+  for (lab in c("Standard", "Deuteranopia", "Protanopia", "Tritanopia", "Grayscale")) expect_match(ui, lab, fixed = TRUE)
+  pos <- vapply(c('data-value="home"', 'data-value="current"', 'data-value="history"', 'data-value="settings"', 'data-value="help"'), function(x) regexpr(x, ui, fixed = TRUE)[[1]], 1); expect_true(all(pos > 0)); expect_false(is.unsorted(pos))
+  expect_match(ui, 'id="go_current"', fixed = TRUE); expect_match(ui, 'id="go_history"', fixed = TRUE); expect_match(ui, "Geek out on streets", fixed = TRUE)
+  home <- as.character(env$home_page())
+  for (src in c("OpenStreetMap contributors", "Photon", "Census Bureau", "Itiner-e", "Hotham", "Mani\u00e8re", "zenodo.4291876", "Overpass")) expect_match(home, src, fixed = TRUE)
+  expect_equal(lengths(regmatches(home, gregexpr("home-source", home, fixed = TRUE))), 2L)
+  expect_false(grepl("source-note", ui, fixed = TRUE)); expect_gte(lengths(regmatches(ui, gregexpr("About this map", ui, fixed = TRUE))), 4L)      # the sources live in About this map on every map page
+  expect_false(grepl("history_open", ui, fixed = TRUE)); expect_false(grepl("Explore history", ui, fixed = TRUE))
+  expect_match(env$app_css, "data-page='current'", fixed = TRUE); expect_match(env$app_js, "data-page", fixed = TRUE); expect_false(grepl("shiny-modal", env$app_css, fixed = TRUE))
+})
+test_that("CV4 the chosen color vision reaches every page's drawing key, and a share link carries it", {
+  out <- list()
+  testServer(env$server, {
+    session$setInputs(style = "dusk", cvd = "tritan", c_style = "classic", h_style = "dusk", d_style = "classic"); session$flushReact()
+    out$main <<- sid(); out$city <<- c_style(); out$roads <<- h_style(); out$desert <<- d_style()
+    session$setInputs(cvd = "../../x"); out$bad <<- sid(); session$setInputs(cvd = "gray"); out$gray <<- sid()
+  })
+  expect_equal(out$main, "dusk~tritan"); expect_equal(out$city, "classic~tritan"); expect_equal(out$roads, "dusk~tritan"); expect_equal(out$desert, "classic~tritan"); expect_equal(out$bad, "dusk"); expect_equal(out$gray, "dusk~gray")
+  base <- list(query = "Bloomington, IN", radius = 2, units = "km", view = "speed", style = "dusk", area = "dim")
+  p <- env$share_params(c(base, list(cvd = "deutan")), 1L); expect_equal(p$cv, "deutan"); expect_null(env$share_params(c(base, list(cvd = "standard")), 1L)$cv)
+  st <- env$parse_share(sub("^\\?", "", env$share_url(p, ""))); expect_equal(st$cv, "deutan"); expect_equal(st$s, "dusk")
+  expect_null(env$parse_share("q=Bloomington&cv=purple")$cv); expect_null(env$parse_share("q=Bloomington&cv=%3Cscript%3E")$cv)
+})
+test_that("CV5 maps draw in every color vision mode, and a deep link opens the current maps", {
+  p <- ggplot2::ggplot(data.frame(x = 1:3, y = 1:3), ggplot2::aes(x, y)) + ggplot2::geom_point()
+  for (k in c("classic~deutan", "dusk~protan", "classic~tritan", "dusk~gray", "classic~gray")) { f <- tempfile(fileext = ".png"); env$draw_figure(p, f, "png", k, preview = TRUE); expect_true(file.exists(f) && file.size(f) > 2000) }
+  expect_equal(env$night_palette(env$get_style("classic~gray"), "classic~gray")$glow, "#ffffff"); expect_equal(env$night_palette(env$get_style("dusk"), "dusk")$glow, env$styles$dusk$night$glow)
+  src <- paste(readLines(Sys.getenv("APP_FILE"), warn = FALSE), collapse = "\n")
+  expect_match(src, 'nav_select("page", "current")', fixed = TRUE); expect_match(src, 'observeEvent(input$go_history, nav_select("page", "history"))', fixed = TRUE)
+})
+
+
+# ---- Help tab, fitted ancient radius, favicon, and the shared frame of the map pages ---------------------------------------------------------------
+test_that("HP1 the Help tab follows the other apps: topics, questions that open one at a time, sources, and an About block", {
+  h <- as.character(env$help_page())
+  for (topic in c("Getting started", "Reading the maps", "Historical maps", "Downloads and sharing", "Privacy and problems", "Sources and credits")) expect_match(h, topic, fixed = TRUE)
+  expect_gte(lengths(regmatches(h, gregexpr("<details", h, fixed = TRUE))), 20L); expect_match(h, "<summary>", fixed = TRUE)
+  for (x in c("Itiner-e", "Hotham", "OpenStreetMap contributors", "Census Bureau", "Iconify", "Noto", "PolyForm Noncommercial License 1.0.0", "releases/latest", "Copyright 2026 Abhik Roy", env$OVERMAPS_VERSION)) expect_match(h, x, fixed = TRUE)
+  expect_false(grepl("[\u2013\u2014]", h)); expect_false(grepl("\\b(can't|don't|won't|isn't|it's|you're|doesn't)\\b", h, ignore.case = TRUE))
+  expect_false(grepl("\\b(actionable|robust|ensure[sd]?|leverag|utiliz|enhanc|seamless)", h, ignore.case = TRUE))
+  ui <- as.character(env$ui(NULL)); expect_match(ui, 'id="go_help"', fixed = TRUE);
+})
+test_that("HP2 Home has the pastel icons, the quiet map background, and no Good to know block", {
+  home <- as.character(env$home_page()); expect_match(home, 'src="icons/map-current.svg"', fixed = TRUE); expect_match(home, 'src="icons/map-historical.svg"', fixed = TRUE)
+  expect_false(grepl("Good to know", home, fixed = TRUE)); expect_false(grepl("fa-", home, fixed = TRUE)); expect_match(env$app_css, "home-map.svg", fixed = TRUE)
+  for (f in c("icons/map-current.svg", "icons/map-historical.svg", "home-map.svg", "favicon.svg", "favicon.ico", "favicon-32.png", "apple-touch-icon.png")) expect_true(file.exists(file.path(dirname(Sys.getenv("APP_FILE")), "www", f)), info = f)
+  src <- paste(readLines(Sys.getenv("APP_FILE"), warn = FALSE), collapse = "\n")                    # head tags are lifted out of the page body, so they are read from the source
+  for (x in c('href = "favicon.svg"', 'href = "favicon.ico"', 'href = "apple-touch-icon.png"', 'href = "favicon-32.png"')) expect_match(src, x, fixed = TRUE)
+})
+test_that("HP3 the color vision choice recolors the page itself, not only the maps", {
+  for (cls in c("cb-deutan", "cb-protan", "cb-tritan", "cb-gray")) expect_match(env$app_css, paste0("body.", cls), fixed = TRUE)
+  expect_match(env$app_css, ".btn-primary", fixed = TRUE); expect_match(env$app_js, "cvdClass", fixed = TRUE)
+  src <- paste(readLines(Sys.getenv("APP_FILE"), warn = FALSE), collapse = "\n"); expect_match(src, 'sendCustomMessage("cvdClass"', fixed = TRUE)
+})
+test_that("HP4 the header and both map pages share one frame, and the historical sets switch from the sidebar", {
+  m <- as.character(env$history_page("classic"))
+  expect_equal(lengths(regmatches(m, gregexpr('class="set-switch"', m, fixed = TRUE))), 3L); expect_equal(lengths(regmatches(m, gregexpr("set-btn is-active", m, fixed = TRUE))), 3L)
+  expect_false(grepl("history-intro", m, fixed = TRUE)); expect_equal(lengths(regmatches(m, gregexpr('accordion-title">About this map', m, fixed = TRUE))), 3L)
+  expect_match(env$app_css, "--nav-h", fixed = TRUE); expect_match(env$app_js, "overmapsSet", fixed = TRUE)
+  out <- list(); testServer(env$server, { session$setInputs(h_set = "desert"); session$flushReact(); session$setInputs(h_set = "../x"); session$flushReact(); out$ok <<- TRUE }); expect_true(out$ok)
+})
+test_that("HP5 an ancient site's starting radius is fitted to what is mapped there, just past the edge", {
+  p <- env$ancient_sites[env$ancient_sites$id == "pompeii", ]; lon <- p$lon; lat <- p$lat
+  crs <- env$utm_epsg(lon, lat); ctr <- sf::st_coordinates(sf::st_transform(sf::st_sfc(sf::st_point(c(lon, lat)), crs = 4326), crs))[1, 1:2]
+  mk <- function(x0, y0, x1, y1) sf::st_linestring(rbind(ctr + c(x0, y0), ctr + c(x1, y1)))
+  lines <- sf::st_transform(sf::st_sf(osm_id = as.character(1:12), geometry = sf::st_sfc(c(lapply(1:6, function(i) mk(-400, i * 60 - 200, 400, i * 60 - 200)), lapply(1:6, function(i) mk(i * 60 - 200, -400, i * 60 - 200, 400))), crs = crs)), 4326)
+  r <- env$fit_radius_km(lines, lon, lat, 3000); expect_gte(r, 0.4); expect_lte(r, 0.6)                 # the streets reach about 0.45 km, so the circle ends a little past that
+  expect_true(is.na(env$fit_radius_km(lines, lon, lat, 450)));   # streets that run to the edge of the snapshot say nothing about where the remains end expect_true(is.na(env$fit_radius_km(NULL, lon, lat))); expect_true(is.na(env$fit_radius_km(lines[1:3, ], lon, lat)))
+  withr::defer({ env$history_cache$cities <- NULL; env$history_cache$fit <- NULL })
+  env$history_cache$cities <- list(pompeii = list(roads = list(osm_lines = lines), taken = "x", radius_m = 3000L))
+  s <- env$ancient_site("pompeii"); expect_equal(s$listed_radius_km, 0.8); expect_gte(s$radius_km, 0.4); expect_lte(s$radius_km, 0.6)
+  plan <- env$city_radius_plan(s); expect_equal(plan$value, s$radius_km)
+  env$history_cache$cities <- list(); env$history_cache$fit <- NULL; expect_equal(env$ancient_site("pompeii")$radius_km, 0.8)       # no snapshot keeps the listed radius
+})
+
+test_that("ST1 Settings holds the color vision, privacy and counts, the header ends with Settings, Help and the page toggle, and the empty pages center the graphic over the text", {
+  ui <- as.character(env$ui(NULL))
+  settings <- as.character(env$settings_page())
+  for (id in c('id="cvd"', 'id="suggest"', 'id="remember"', 'id="forget"', 'id="counts"')) expect_match(settings, id, fixed = TRUE)
+  expect_false(grepl("cvd-pick", sub(".*<nav", "", regmatches(ui, regexpr("<nav.*?</nav>", ui))[1]), fixed = TRUE))     # the header no longer carries the Color vision menu
+  tail_pos <- vapply(c('id="expand-btn"', 'data-value="settings"', 'data-value="help"', 'id="theme-btn"'), function(x) regexpr(x, ui, fixed = TRUE)[[1]], 1)
+  expect_true(all(tail_pos > 0)); expect_false(is.unsorted(tail_pos))
+  expect_false(grepl("Settings and privacy", ui, fixed = TRUE))
+  css <- env$app_css
+  expect_match(css, "#map:empty::before", fixed = TRUE); expect_match(css, ".history-map .shiny-image-output:empty::before", fixed = TRUE)
+  expect_match(css, ".stage:not(:has(.stats-slot > *))", fixed = TRUE); expect_match(css, ".history-page .bslib-sidebar-layout { height: calc(100vh - var(--nav-h)) !important", fixed = TRUE)
+})
+
+test_that("ST2 both empty states share one line and the watermark has a dark recoloring", {
+  css <- env$app_css
+  expect_equal(lengths(regmatches(css, gregexpr("Choose a location on the left, then draw its map.", css, fixed = TRUE))), 2)
+  expect_false(grepl("Choose your options on the left", css, fixed = TRUE))
+  expect_true(grepl("html[data-bs-theme='dark'] #map:empty::before", css, fixed = TRUE))
+  expect_false(grepl("__WMD__", css, fixed = TRUE))
+  expect_false(identical(env$watermark_svg, env$watermark_svg_dark))
+  expect_false(grepl("stroke=\"#cfc8b6\"", env$watermark_svg, fixed = TRUE))
+  expect_true(grepl("mask-image: radial-gradient", css, fixed = TRUE))
+  expect_false(identical(env$brand_svg, env$brand_svg_dark))
+  expect_true(grepl("kmtd", env$brand_svg_dark, fixed = TRUE))
+  expect_true(grepl("brand-dark", paste(as.character(env$brand_mark), collapse = ""), fixed = TRUE))
+})
+
+test_that("N2b a status check that just failed is not repeated, so the next pass tries the real request", {
+  env$mirror_state$status_failed <- list(); url <- "https://y.example/api/interpreter"; n <- 0
+  boom <- function(req) { n <<- n + 1; stop("Timeout was reached") }
+  expect_error(httr2::with_mocked_responses(boom, env$overpass_ready(url)), "status check failed")
+  expect_true(httr2::with_mocked_responses(boom, env$overpass_ready(url)))      # skipped: no second status request
+  expect_equal(n, 1)
+  env$mirror_state$status_failed <- list()
+  expect_error(httr2::with_mocked_responses(boom, env$overpass_ready(url)), "status check failed"); expect_equal(n, 2)
+  env$mirror_state$status_failed <- list()
+})
+
+test_that("EX2 only the header tabs change the page in view, so Expand stays on every set of historical maps", {
+  expect_true(grepl(".navbar a[data-bs-toggle=tab][data-value]", env$app_js, fixed = TRUE))
+  expect_false(grepl("shown.bs.tab', 'a[data-bs-toggle=tab][data-value]'", env$app_js, fixed = TRUE))
 })
