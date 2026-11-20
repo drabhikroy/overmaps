@@ -2558,10 +2558,10 @@ test_that("R16a looks_like_address needs a leading house number and city_of_labe
   expect_equal(env$city_of_label(""), "")
 })
 
-test_that("R16b the app is named Overmaps and offers eight views; Block length has km and mile scales", {
+test_that("R16b the app is named Overmaps and offers ten views; Block length has km and mile scales", {
   ui <- as.character(env$ui(NULL))
   expect_true(grepl("Overmaps", ui, fixed = TRUE)); expect_false(grepl("Street Maps", ui, fixed = TRUE)); expect_false(grepl("Königsberg Maps", ui, fixed = TRUE))
-  expect_length(env$views, 8); expect_true(all(c("lights", "nature") %in% names(env$views))); expect_true("blocks" %in% names(env$views)); expect_equal(names(env$view_blurbs), names(env$views))
+  expect_length(env$views, 10); expect_true(all(c("lights", "nature", "census", "homes") %in% names(env$views))); expect_true("blocks" %in% names(env$views)); expect_equal(names(env$view_blurbs), names(env$views))
   old <- env$unit_env$u; withr::defer(env$unit_env$u <- old)
   env$unit_env$u <- "km"; sk <- env$block_scheme(); expect_equal(sk$short, "200 m"); expect_equal(length(sk$labels), 4)
   expect_equal(as.character(env$block_class(c(50, 150, 300, 900))), sk$labels)
@@ -3549,4 +3549,118 @@ test_that("N2b a status check that just failed is not repeated, so the next pass
 test_that("EX2 only the header tabs change the page in view, so Expand stays on every set of historical maps", {
   expect_true(grepl(".navbar a[data-bs-toggle=tab][data-value]", env$app_js, fixed = TRUE))
   expect_false(grepl("shown.bs.tab', 'a[data-bs-toggle=tab][data-value]'", env$app_js, fixed = TRUE))
+})
+
+# ---- Census population and housing ---------------------------------------------------------------------------------------------------
+census_bg <- function(n = 8, w = 700, empty = c(4, 12)) {          # a grid of block groups around the test center, in lon/lat like TIGERweb returns them
+  L <- list(); P <- numeric(); H <- numeric(); A <- numeric()
+  for (i in 0:(n - 1)) for (j in 0:(n - 1)) {
+    x0 <- cx + (i - n / 2) * w; y0 <- cy + (j - n / 2) * w; k <- length(L) + 1
+    L[[k]] <- st_polygon(list(cbind(c(x0, x0 + w, x0 + w, x0, x0), c(y0, y0, y0 + w, y0 + w, y0))))
+    A[k] <- w * w * 0.9; P[k] <- if (k %in% empty) 0 else round(A[k] / 1e6 * (50 + 400 * k)); H[k] <- round(P[k] / 2.5)
+  }
+  st_sf(GEOID = sprintf("%012d", seq_along(L)), POP100 = P, HU100 = H, AREALAND = A, geometry = st_transform(st_sfc(L, crs = crs0), 4326))
+}
+test_that("CN1 the Census classes are round numbers in either unit, and Housing sits lower than Population", {
+  for (u in c("km", "mi")) for (m in c("pop", "hu")) {
+    sc <- env$census_scheme(u, m); expect_length(sc$labels, 7); expect_length(sc$breaks, 7); expect_equal(sc$breaks[1], 0); expect_true(is.infinite(sc$breaks[7])); expect_false(is.unsorted(sc$breaks))
+  }
+  expect_equal(env$census_scheme("km", "pop")$labels, c("No residents", "Under 100", "100 to 500", "500 to 1,500", "1,500 to 4,000", "4,000 to 10,000", "10,000 or more"))
+  expect_equal(env$census_scheme("mi", "pop")$labels[2:3], c("Under 250", "250 to 1,000")); expect_equal(env$census_scheme("km", "hu")$labels[c(1, 2)], c("No housing", "Under 50"))
+  expect_equal(env$census_scheme("km", "pop")$area, "square kilometer"); expect_equal(env$census_scheme("mi", "pop")$area, "square mile")
+})
+test_that("CN2 prep_census clips to the map, counts only the share of each block group inside it, and is never NULL", {
+  bg <- census_bg(); cen <- env$prep_census(bg, lon0, lat0, 2500, crs0)
+  expect_true(cen$has_census); expect_gt(cen$n_bg, 5); expect_lt(cen$pop, sum(bg$POP100)); expect_gt(cen$pop, 0); expect_lt(cen$hu, sum(bg$HU100))
+  expect_lte(as.numeric(sum(sf::st_area(cen$cells))), pi * 2500^2 * 1.001)
+  big <- env$prep_census(bg, lon0, lat0, 20000, crs0); expect_equal(big$pop, sum(bg$POP100), tolerance = 1e-6)          # the whole grid fits, so every resident counts
+  expect_equal(big$max_dens_km, max(bg$POP100 / (bg$AREALAND / 1e6)), tolerance = 1e-6)
+  none <- env$prep_census(NULL, lon0, lat0, 2500, crs0); expect_false(none$has_census); expect_false(isTRUE(none$failed)); expect_gt(none$area_km2, 19)
+  expect_true(env$prep_census(NULL, lon0, lat0, 2500, crs0, failed = TRUE)$failed)
+  far <- env$prep_census(bg, lon0 + 5, lat0, 2500, crs0); expect_false(far$has_census)
+  shaped <- env$prep_census(bg, lon0, lat0, 2500, crs0, shape = st_transform(st_sfc(st_polygon(list(cbind(cx + c(-900, 900, 900, -900, -900), cy + c(-900, -900, 900, 900, -900)))), crs = crs0), crs0))
+  expect_lt(shaped$pop, cen$pop)
+})
+test_that("CN3 view_data classes block groups, with no residents on its own, and words both units and the missing-data cases", {
+  bg <- census_bg(); cen <- env$prep_census(bg, lon0, lat0, 3000, crs0); l <- demo_lines_prepped()
+  vd <- env$view_data("census", l, 3000, ctr_m(), census = cen)
+  expect_equal(vd$levels[1], "No residents"); expect_true(any(vd$cells$cls == "No residents")); expect_true(all(vd$cells$cls[vd$cells$pop <= 0] == "No residents")); expect_false(anyNA(vd$cells$cls))
+  expect_match(vd$subtitle, "people lived within 3 km"); expect_match(vd$subtitle, "2020 Census"); expect_match(vd$caption, "estimate"); expect_length(vd$tiles, 3); expect_match(vd$tiles[[2]]$label, "Residents")
+  edge <- cen; edge$cells <- edge$cells[1:3, ]; edge$cells$pop <- c(5, 5, 5); edge$cells$dens_km <- c(99.9, 100, 4000)               # exactly on a break goes up a class
+  e <- env$view_data("census", l, 3000, ctr_m(), census = edge); expect_equal(as.character(e$cells$cls), c("Under 100", "100 to 500", "4,000 to 10,000"))
+  mi <- env$view_data("census", l, 3000, ctr_m(), units = "mi", census = cen); expect_match(mi$subtitle, "per square mile"); expect_equal(mi$levels[2], "Under 250")
+  expect_equal(max(mi$cells$dens), max(cen$cells$dens_km) * env$km_per_mile^2, tolerance = 1e-9)
+  hu <- env$view_data("homes", l, 3000, ctr_m(), census = cen); expect_match(hu$subtitle, "housing units stood"); expect_equal(hu$levels[1], "No housing"); expect_match(hu$tiles[[2]]$label, "Housing units")
+  out <- env$view_data("census", l, 3000, ctr_m(), census = env$prep_census(NULL, lon0, lat0, 3000, crs0)); expect_false(out$has_census); expect_match(out$subtitle, "United States and its territories")
+  down <- env$view_data("census", l, 3000, ctr_m(), census = env$prep_census(NULL, lon0, lat0, 3000, crs0, failed = TRUE)); expect_match(down$subtitle, "did not answer")
+  expect_false(env$view_data("census", l, 3000, ctr_m(), census = NULL)$has_census)
+})
+test_that("CN4 Population and Housing draw in every look and color vision mode, show all seven legend classes, and say so when there is no data", {
+  cen <- env$prep_census(census_bg(), lon0, lat0, 3000, crs0); l <- demo_lines_prepped()
+  for (v in c("census", "homes")) for (st in c(names(env$styles), "classic~tritan", "dusk~deutan", "dusk~gray", "classic~gray")) {
+    p <- env$make_map(l, "Test", lon0, lat0, 3000, crs0, view = v, style = st, census = cen); expect_s3_class(p, "patchwork")
+    expect_equal(length(p[[1]]$scales$get_scales("fill")$get_limits()), 7); expect_match(p$patches$annotation$caption, "2020 Census")
+  }
+  f <- tempfile(fileext = ".png"); env$draw_figure(env$make_map(l, "Test", lon0, lat0, 3000, crs0, view = "census", style = "dusk", census = cen), f, "png", "dusk", preview = TRUE); expect_gt(file.size(f), 30000)
+  none <- env$make_map(l, "Berlin", lon0, lat0, 3000, crs0, view = "census", census = env$prep_census(NULL, lon0, lat0, 3000, crs0)); expect_s3_class(none, "patchwork")
+  expect_null(none[[1]]$scales$get_scales("fill")); expect_match(none$patches$annotation$subtitle, "United States")
+  a <- env$make_map(l, "Test", lon0, lat0, 3000, crs0, view = "hierarchy"); b <- env$make_map(l, "Test", lon0, lat0, 3000, crs0, view = "hierarchy", census = cen)
+  expect_equal(layer_geoms(a), layer_geoms(b))
+  expect_equal(unname(env$views["census"]), "Population"); expect_equal(unname(env$views["homes"]), "Housing"); expect_equal(env$get_view("homes"), "homes"); expect_equal(length(env$views) %% 2, 0)
+  expect_match(env$fig_alt("Test", env$view_data("census", l, 3000, ctr_m(), census = cen), 3000), "2020 Census")
+})
+test_that("CN5 census_fetch asks TIGERweb for block groups by bounding box, reads the GeoJSON, and treats an error or an empty answer safely", {
+  asked <- NULL; geo <- function(x) charToRaw(x)
+  with_resp <- function(body, code) { old <- env$req_perform; env$req_perform <- function(req, ...) { asked <<- req$url; httr2::response(status_code = 200, headers = list(`Content-Type` = "application/json"), body = geo(body)) }; on.exit(env$req_perform <- old); force(code) }
+  gj <- paste0('{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"GEOID":"540610001001","POP100":1200,"HU100":500,"AREALAND":2000000},',
+               '"geometry":{"type":"Polygon","coordinates":[[[-79.86,38.92],[-79.84,38.92],[-79.84,38.94],[-79.86,38.94],[-79.86,38.92]]]}}]}')
+  bb <- c(xmin = -79.9, ymin = 38.9, xmax = -79.8, ymax = 39); x <- with_resp(gj, env$census_fetch(bb))
+  expect_s3_class(x, "sf"); expect_equal(x$POP100, 1200); expect_match(asked, "tigerweb.geo.census.gov", fixed = TRUE); expect_match(asked, "Tracts_Blocks/MapServer/1/query", fixed = TRUE)
+  expect_match(asked, "POP100", fixed = TRUE); expect_match(asked, "-79.9", fixed = TRUE); expect_match(asked, "esriGeometryEnvelope", fixed = TRUE); expect_match(asked, "f=geojson", fixed = TRUE)
+  expect_error(with_resp('{"error":{"code":400,"message":"bad"}}', env$census_fetch(bb)), "error")
+  expect_null(with_resp('{"type":"FeatureCollection","features":[]}', env$census_fetch(bb)))
+  r <- with_resp(gj, env$load_census(lon0, lat0, 3000, crs0)); expect_type(r, "list"); expect_true(r$has_census); expect_false(isTRUE(r$failed))
+  old <- env$req_perform; env$req_perform <- function(req, ...) stop("offline"); on.exit(env$req_perform <- old, add = TRUE)
+  down <- suppressMessages(env$load_census(lon0, lat0, 3000, crs0)); expect_true(down$failed); expect_false(down$has_census)
+})
+test_that("CN6 Census data is downloaded only when Population or Housing is chosen, once per place, a failure is retried, and the map type survives a share link", {
+  calls <- with_stubs(NULL, boundary = st_transform(sq_shape(2500), 4326)); n <- 0L; failing <- FALSE; out <- list()
+  env$load_census <- function(lon, lat, radius_m, crs_m, shape = NULL) { n <<- n + 1L; if (failing) env$prep_census(NULL, lon, lat, radius_m, crs_m, shape, failed = TRUE) else env$prep_census(census_bg(), lon, lat, radius_m, crs_m, shape) }
+  env$fetch_roads <- function(lon, lat, radius_m, crs_m, shape = NULL, on_try = NULL, detail = "all") bw_roads()
+  testServer(env$server, {
+    session$setInputs(query = "Elkins", find = 1, choice = "1", radius = 3, labels = TRUE, style = "classic", view = "hierarchy", area = "circle", locals = FALSE, units = "km", draw = 1)
+    out$before <<- n; session$setInputs(view = "census"); session$flushReact(); out$tiles <<- as.character(output$stats$html)
+    session$setInputs(view = "hierarchy"); session$flushReact(); session$setInputs(view = "census"); session$flushReact(); session$setInputs(view = "homes"); session$flushReact()
+    out$after <<- n; out$dl <<- file.size(output$download) > 30000
+    failing <<- TRUE; session$setInputs(radius = 2); session$setInputs(draw = 2); session$flushReact(); session$setInputs(view = "census"); session$flushReact(); out$f1 <<- n
+    session$setInputs(view = "hierarchy"); session$flushReact(); session$setInputs(view = "census"); session$flushReact(); out$f2 <<- n
+  })
+  expect_equal(out$before, 0L); expect_equal(out$after, 1L); expect_match(out$tiles, "Residents"); expect_true(out$dl); expect_gt(out$f2, out$f1)
+  expect_equal(env$share_params(list(query = "Elkins", view = "census", units = "km", radius = 3), 1)$v, "census"); expect_equal(env$share_params(list(query = "Elkins", view = "homes", units = "km", radius = 3), 1)$v, "homes")
+})
+test_that("CN7 comparing in Population loads the Census data for each place, and the privacy notes name the Census host", {
+  calls <- with_stubs(NULL); cmp_geo(calls); n <- 0L
+  env$load_census <- function(lon, lat, radius_m, crs_m, shape = NULL) { n <<- n + 1L; env$prep_census(census_bg(), lon, lat, radius_m, crs_m, shape) }
+  env$fetch_roads <- function(lon, lat, radius_m, crs_m, shape = NULL, on_try = NULL, detail = "all") bw_roads()
+  g <- cmp_g(); g$lines <- env$prep_lines(bw_roads(), lon0, lat0, 3000, crs0)
+  r <- env$compare_build(g, "Morgantown", "census", "classic", "km"); expect_null(r$error); expect_equal(n, 2L); expect_s3_class(r$fig, "patchwork")
+  ui <- as.character(env$ui(NULL)); expect_match(ui, "Population and Housing"); expect_match(ui, "TIGERweb")
+  sec <- readLines(file.path(dirname(normalizePath(app_file)), "SECURITY.md")); expect_true(any(grepl("tigerweb.geo.census.gov", sec, fixed = TRUE)))
+})
+test_that("PE1 only the sites with a published estimate show one, as an estimate with its period and source", {
+  est <- env$ancient_estimates
+  expect_true(all(est$id %in% env$ancient_sites$id)); expect_false(anyDuplicated(est$id) > 0)
+  expect_true(all(nzchar(est$est) & nzchar(est$when) & nzchar(est$who)))
+  expect_true(all(grepl("\\(\\d{4}\\)", est$who)))                              # every source carries a year
+  expect_null(env$city_estimate("pompeii")); expect_null(env$city_estimate("")); expect_null(env$city_estimate(NULL))
+  e <- env$city_estimate("great_zim"); expect_match(env$city_estimate_text(e), "^Estimated population at its peak: no more than 10,000")
+  expect_match(env$city_estimate_text(e), "An estimate, not a count\\.$")
+  expect_match(env$city_estimate("angkor_thom")$est, "not the walled city alone")  # the Angkor figure is for the region, and says so
+})
+test_that("PE2 the estimate reaches the map caption for a site that has one and not for one that does not", {
+  expect_match(env$city_note(env$ancient_site("ostia"), "direction"), "estimated population in the 2nd century CE: between 22,000 and 58,000 people")
+  expect_match(env$city_note(env$ancient_site("ostia"), "nature"), "an estimate and not a count; water and shores")
+  expect_false(grepl("estimated population", env$city_note(env$ancient_site("pompeii"), "direction")))
+  expect_match(as.character(env$ui(NULL)), "Why do only some ancient sites show a population estimate")
+  expect_match(paste(readLines(file.path(dirname(normalizePath(app_file)), "data", "README.md")), collapse = "\n"), "Cutler")
 })

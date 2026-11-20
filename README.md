@@ -6,7 +6,7 @@ Geek out on streets.
 [![R Shiny](https://img.shields.io/badge/built%20with-R%20Shiny-1f6fb2.svg)](https://shiny.posit.co/)
 [![Release](https://img.shields.io/github/v/release/drabhikroy/overmaps?display_name=tag)](https://github.com/drabhikroy/overmaps/releases/latest)
 
-Overmaps turns the street network of any place into a poster-quality map. Type an address, a city, or a landmark, choose what you want to see, and download a print-ready file. The maps cover the road hierarchy, posted speed limits, which way the streets run, block length, street density, bike and walk paths, street lights, and nature and water. A second page, Historical maps, does the same kind of work for the roads of the Roman Empire, the street plans of ninety ancient sites, and modeled caravan routes across the Egyptian desert.
+Overmaps turns the street network of any place into a poster-quality map. Type an address, a city, or a landmark, choose what you want to see, and download a print-ready file. The maps cover the road hierarchy, posted speed limits, which way the streets run, block length, street density, bike and walk paths, street lights, nature and water, and, for places in the United States, population and housing from the 2020 Census. A second page, Historical maps, does the same kind of work for the roads of the Roman Empire, the street plans of ninety ancient sites, and modeled caravan routes across the Egyptian desert.
 
 ![The Overmaps app showing the road hierarchy of Morgantown, West Virginia, in the Classic look on the light page. The sidebar with the place, map type, and look choices is on the left, and the finished map with its legend is on the right.](docs/overmaps-classic.png)
 
@@ -44,6 +44,8 @@ Search by address, city, or landmark. Address suggestions appear as you type, in
 | Bike & walk | Sidewalks, bike lanes, and paths, as tagged in OpenStreetMap. |
 | Street lights | Lit streets and mapped street lamps glowing against a night version of the chosen look. The map reports how much lighting is mapped, because OpenStreetMap volunteers tag lighting unevenly from place to place. |
 | Nature & water | Parks, woods, grass, lakes, rivers, and the sea, drawn softly under the streets, with the share of the map each one covers. |
+| Population | U.S. only. Census block groups shaded by residents per square kilometer (or square mile) from the 2020 Census, with the streets drawn over them. The classes are fixed, so two places compare fairly, and the total is an estimate because a block group at the edge counts only for the part inside the map. |
+| Housing | U.S. only. The same block groups shaded by housing units per square kilometer (or square mile). Outside the United States, or if the Census service does not answer, both maps draw the streets alone and say so. |
 
 - **Circle, city limits, or both.** The radius starts just past the city limits, around the middle of the city. Choose a radius from 1 to 5 kilometers (or miles), outline the city limits, or map the city limits alone.
 - **Compare places.** Put places side by side, including well-known planned street grids.
@@ -98,6 +100,8 @@ Street plans of ninety ancient sites in 22 regions, drawn from excavated streets
 | Taş Tepeler | Göbekli Tepe and Karahan Tepe |
 
 The Taş Tepeler sites are about 11,500 years old and predate streets, so their maps show only today's mapped paths and say so.
+
+Where scholars have published a population estimate for a site, the note and the map caption give it as an estimate, not a count, with its period and source. Only five sites have one so far (Ostia Antica, Knossos, Teotihuacan, Angkor, and Great Zimbabwe), because a site is included only when a figure can be cited. The Angkor figure covers the whole Greater Angkor Region, not the walled city. The references are in [data/README.md](data/README.md).
 
 Besides the street maps, every site has a Nature & water map, with the water, woods, and parks mapped around it today and a note that rivers and coasts have moved. A site also has a Street lights map where OpenStreetMap holds enough lamps or lit streets to draw one. Both show modern features, not ancient ones. Each map states how many streets OpenStreetMap holds for the site, because some sites are thinly mapped. A saved snapshot of the streets, water, and lamps can ship with the app, so the maps draw at once (see [data/README.md](data/README.md)).
 
@@ -194,7 +198,7 @@ Overmaps has no accounts and no telemetry. Place text goes to the services that 
 
 - **Street data.** Street geometry comes from OpenStreetMap through the Overpass API, with several mirrors tried in turn.
 - **Places.** Places are found with Nominatim, suggestions come from Photon, and U.S. house numbers can be matched against the Census Bureau geocoder.
-- **Extra downloads.** The Bike & walk, Street lights, and Nature & water maps each ask for one more download, only when chosen.
+- **Extra downloads.** The Bike & walk, Street lights, and Nature & water maps each ask for one more download, only when chosen. The Population and Housing maps ask the Census Bureau's TIGERweb service for the block groups around the map, and send only the map's bounding box.
 - **Drawing.** Roads are classed by role, projected to a local UTM zone so distances are true, and drawn with ggplot2 and patchwork.
 - **Bundled data.** The Roman roads come from the bundled Itiner-e data (see [data/README.md](data/README.md)).
 
@@ -259,6 +263,8 @@ Required notice: Copyright 2026 Abhik Roy.
 ### Data and artwork credits
 
 - Map data: OpenStreetMap contributors (ODbL).
+- Population and housing: U.S. Census Bureau, 2020 Census, through TIGERweb.
+- Population estimates for ancient sites: the studies listed in [data/README.md](data/README.md).
 - Roman roads: Itiner-e (CC BY 4.0).
 - Travel times: Hotham (CC BY 4.0).
 - Desert routes: Manière, Crépy and Redon, doi:10.5281/zenodo.4291876 (CC BY 4.0).

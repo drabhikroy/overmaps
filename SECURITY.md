@@ -7,6 +7,7 @@ Overmaps runs on the machine that starts it. It keeps no account and writes no t
 - `nominatim.openstreetmap.org` finds a place by name or address and supplies its city limits.
 - `photon.komoot.io` offers suggestions while you type.
 - `geocoding.geo.census.gov` is asked for U.S. street addresses that include a city and state.
+- `tigerweb.geo.census.gov` supplies the 2020 Census block groups for the Population and Housing maps. It receives only the coordinates of the map's bounding box, and only when you choose one of those maps.
 - `overpass-api.de`, `overpass.private.coffee`, `maps.mail.ru`, and `ovp.dresel.systems` supply street geometry. The app tries them in turn.
 - `api.openstreetmap.org` is the fallback source of street geometry for small areas.
 - Google Fonts is contacted at startup for the map typefaces. If it cannot be reached, the app falls back to a standard sans serif font.

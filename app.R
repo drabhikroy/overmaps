@@ -1016,6 +1016,60 @@ prep_nature <- function(roads, lon, lat, radius_m, crs_m, shape = NULL) {
 load_nature <- function(lon, lat, radius_m, crs_m, shape = NULL) {
   prep_nature(fetch_roads(lon, lat, radius_m, crs_m, shape, detail = "nature"), lon, lat, radius_m, crs_m, shape)
 }
+# Census population for the Population map. The Census Bureau's TIGERweb service returns each 2020 block group with its head count and its land area in one free
+# request that needs no key. A block group holds roughly 600 to 3,000 people, so they are fine enough to show how a place is laid out. The service covers the
+# United States and its territories only; anywhere else it returns nothing, and the map says so instead of failing.
+census_tiger_url <- "https://tigerweb.geo.census.gov/arcgis/rest/services/Census2020/Tracts_Blocks/MapServer/1/query"
+census_fetch <- function(bb) {
+  env <- paste(format(round(as.numeric(bb[c("xmin", "ymin", "xmax", "ymax")]), 5), nsmall = 5, trim = TRUE), collapse = ",")
+  resp <- request(census_tiger_url) |>
+    req_url_query(where = "1=1", geometry = env, geometryType = "esriGeometryEnvelope", inSR = 4326, spatialRel = "esriSpatialRelIntersects",
+                  outFields = "GEOID,POP100,HU100,AREALAND", returnGeometry = "true", outSR = 4326, geometryPrecision = 5, f = "geojson") |>
+    req_user_agent(user_agent) |> req_timeout(30) |> req_retry(max_tries = 2, is_transient = function(r) resp_status(r) %in% c(429, 500, 502, 503, 504)) |> req_perform()
+  txt <- resp_body_string(resp)
+  if (grepl("\"error\"", substr(txt, 1, 200), fixed = TRUE)) stop("the Census Bureau service returned an error")
+  x <- sf::read_sf(txt, quiet = TRUE)
+  if (nrow(x) == 0 || !all(c("POP100", "HU100", "AREALAND") %in% names(x))) return(NULL)
+  x
+}
+# Fixed classes in round numbers, in residents per square kilometer or per square mile, so two places can be compared and each legend entry always means the same.
+# Homes (the Census's housing units) use lower breaks, since a home holds about two to three people.
+census_scheme <- function(u = unit_env$u, measure = "pop") {
+  mi <- identical(u, "mi")
+  b <- if (measure == "hu") { if (mi) c(100, 400, 1500, 4000, 10000) else c(50, 200, 600, 1500, 4000) } else { if (mi) c(250, 1000, 4000, 10000, 25000) else c(100, 500, 1500, 4000, 10000) }
+  f <- function(x) format(x, big.mark = ",", scientific = FALSE, trim = TRUE)
+  list(breaks = c(0, b, Inf), labels = c(if (measure == "hu") "No housing" else "No residents", paste("Under", f(b[1])), paste(f(b[1:4]), "to", f(b[2:5])), paste(f(b[5]), "or more")),
+       area = if (mi) "square mile" else "square kilometer")
+}
+# One block group's density is spread evenly across it, so a cell is shaded by its block group and the resident total counts the share of each block group that
+# lies inside the map. Never NULL; has_census says whether there is anything to draw.
+prep_census <- function(bg, lon, lat, radius_m, crs_m, shape = NULL, failed = FALSE) {
+  center_m <- st_transform(st_sfc(st_point(c(lon, lat)), crs = 4326), crs_m)
+  clip <- st_make_valid(if (is.null(shape)) st_buffer(center_m, radius_m) else shape)
+  area_km2 <- as.numeric(st_area(clip)) / 1e6
+  none <- list(has_census = FALSE, failed = failed, area_km2 = area_km2)
+  if (is.null(bg) || nrow(bg) == 0) return(none)
+  g <- st_sf(pop = as.numeric(bg$POP100), hu = as.numeric(bg$HU100), land_km2 = as.numeric(bg$AREALAND) / 1e6, geometry = st_make_valid(st_transform(st_geometry(bg), crs_m)))
+  g$full <- as.numeric(st_area(g))
+  g$dens_km <- ifelse(g$land_km2 > 0, g$pop / g$land_km2, 0); g$hdens_km <- ifelse(g$land_km2 > 0, g$hu / g$land_km2, 0)
+  g <- g[is.finite(g$pop) & is.finite(g$hu) & is.finite(g$dens_km) & is.finite(g$hdens_km) & g$full > 0, ]
+  cells <- tryCatch(suppressWarnings(st_intersection(g, clip)), error = function(e) NULL)
+  if (is.null(cells) || nrow(cells) == 0) return(none)
+  cells <- suppressWarnings(st_collection_extract(cells, "POLYGON"))
+  if (nrow(cells) == 0) return(none)
+  share <- pmin(as.numeric(st_area(cells)) / cells$full, 1)
+  list(has_census = TRUE, failed = FALSE, cells = cells[, c("pop", "hu", "dens_km", "hdens_km")], pop = sum(cells$pop * share), hu = sum(cells$hu * share),
+       max_dens_km = max(cells$dens_km), max_hdens_km = max(cells$hdens_km), n_bg = nrow(cells), area_km2 = area_km2)
+}
+load_census <- function(lon, lat, radius_m, crs_m, shape = NULL) {
+  center_m <- st_transform(st_sfc(st_point(c(lon, lat)), crs = 4326), crs_m)
+  clip <- if (is.null(shape)) st_buffer(center_m, radius_m) else shape
+  bb <- st_bbox(st_transform(clip, 4326))
+  pad <- 0.0005; bb[c("xmin", "ymin")] <- bb[c("xmin", "ymin")] - pad; bb[c("xmax", "ymax")] <- bb[c("xmax", "ymax")] + pad
+  bg <- tryCatch(census_fetch(bb), error = function(e) { message("census: ", conditionMessage(e)); structure(list(), class = "lookup_failed") })
+  if (inherits(bg, "lookup_failed")) return(prep_census(NULL, lon, lat, radius_m, crs_m, shape, failed = TRUE))
+  prep_census(bg, lon, lat, radius_m, crs_m, shape)
+}
 # Place one name per through route, beside its road, skipping names that do not fit or would crowd.
 label_mm <- 2.9   # street-name text size (ggplot mm, about 8 pt)
 make_labels <- function(lines, radius_m, crs_m, center_m, shape = NULL) {
@@ -1100,9 +1154,9 @@ block_pieces <- function(lines) {
 }
 block_class <- function(len_m) { sc <- block_scheme(); cut(len_m, sc$breaks_m, labels = sc$labels, right = FALSE) }
 # The order of the picker, which fills two columns row by row, so each row is a pair: the roads (class, speed), the grid (direction, block length), how much street
-# and who it serves (density, bike and walk), and the surroundings (lights, nature and water).
+# and who it serves (density, bike and walk), the surroundings (lights, nature and water), and the people who live there (population).
 views <- c(hierarchy = "Road hierarchy", speed = "Speed limits", direction = "Direction", blocks = "Block length",
-           density = "Street density", active = "Bike & walk", lights = "Street lights", nature = "Nature & water")
+           density = "Street density", active = "Bike & walk", lights = "Street lights", nature = "Nature & water", census = "Population", homes = "Housing")
 view_blurbs <- c(hierarchy = "Roads by role, from highways to local streets.",
                  speed = "Posted speed limits, where OpenStreetMap has them.",
                  direction = "Which way the streets run, with a compass rose.",
@@ -1110,7 +1164,9 @@ view_blurbs <- c(hierarchy = "Roads by role, from highways to local streets.",
                  density = "Street length per square kilometer, in hexagons.",
                  active = "Sidewalks, bike lanes, and paths, as tagged in OpenStreetMap.",
                  lights = "Lit streets and mapped lamps, glowing against the night.",
-                 nature = "Parks, woods, rivers, and lakes under the streets.")
+                 nature = "Parks, woods, rivers, and lakes under the streets.",
+                 census = "Residents per square kilometer from the 2020 Census, U.S. places.",
+                 homes = "Homes per square kilometer from the 2020 Census, U.S. places.")
 get_view <- function(x) {
   x <- as.character(x %||% "hierarchy")[1]
   if (!is.na(x) && x %in% names(views)) x else "hierarchy"
@@ -1275,9 +1331,9 @@ net_tiles <- function(net) {
 center_of <- function(lon, lat, crs_m) st_transform(st_sfc(st_point(c(lon, lat)), crs = 4326), crs_m)
 
 # Everything a map type needs to know about the streets: the numbers for its subtitle, tiles, and legend.
-view_data <- function(view, lines, radius_m, center_m, shape = NULL, detail = "all", center_txt = NULL, units = "km", net = NULL, paths = NULL, fine = FALSE, lights = NULL, nature = NULL) {
+view_data <- function(view, lines, radius_m, center_m, shape = NULL, detail = "all", center_txt = NULL, units = "km", net = NULL, paths = NULL, fine = FALSE, lights = NULL, nature = NULL, census = NULL) {
   old_u <- unit_env$u; unit_env$u <- as_unit(units); on.exit(unit_env$u <- old_u, add = TRUE)
-  vd <- view_data_core(view, lines, radius_m, center_m, shape, center_txt, paths, fine, lights, nature)
+  vd <- view_data_core(view, lines, radius_m, center_m, shape, center_txt, paths, fine, lights, nature, census)
   vd$net_tiles <- net_tiles(net)
   if (identical(detail, "all")) return(vd)
   note <- if (identical(detail, "main")) "Local streets (residential and unclassified) are not included at this size, to keep the map fast."
@@ -1290,7 +1346,7 @@ view_data <- function(view, lines, radius_m, center_m, shape = NULL, detail = "a
   } else vd$subtitle <- paste(vd$subtitle, note)
   vd
 }
-view_data_core <- function(view, lines, radius_m, center_m, shape = NULL, center_txt = NULL, paths = NULL, fine = FALSE, lights = NULL, nature = NULL) {
+view_data_core <- function(view, lines, radius_m, center_m, shape = NULL, center_txt = NULL, paths = NULL, fine = FALSE, lights = NULL, nature = NULL, census = NULL) {
   view <- get_view(view); r <- radius_txt(radius_m)
   where <- if (is.null(shape)) paste0("within ", r, " ", ulab(), " of ", center_txt %||% "the center") else "inside the city limits"   # used in subtitles and tiles
   edge <- if (is.null(shape)) "ring" else "boundary"
@@ -1412,7 +1468,32 @@ view_data_core <- function(view, lines, radius_m, center_m, shape = NULL, center
                    tile("s-local", paste0(short_pct, "%"), "Short blocks", paste0("of street length, in blocks under ", sc$short)))))
   }
 
-  # density
+  if (view %in% c("census", "homes")) {
+    hu <- identical(view, "homes"); m <- if (hu) "hu" else "pop"
+    sc <- census_scheme(measure = m); lv <- sc$labels; fmt_n <- function(x) format(x, big.mark = ",", scientific = FALSE, trim = TRUE)
+    what <- if (hu) "housing units" else "residents"; Noun <- if (hu) "Housing units" else "Residents"
+    credit <- if (hu) "housing units are from the 2020 Census (U.S. Census Bureau)" else "population is from the 2020 Census (U.S. Census Bureau)"
+    if (!isTRUE(census$has_census)) {
+      why <- if (isTRUE(census$failed)) "The Census Bureau did not answer, so nothing is shaded. Try again in a moment."
+             else "The Census Bureau publishes counts for the United States and its territories only, so there is nothing to shade for this place."
+      return(list(view = view, scope = scope, noun = "with no Census data available", cells = NULL, levels = lv, has_census = FALSE, subtitle = why,
+        caption = paste0(credit, "; none is available here"),
+        tiles = list(t_total, tile("s-through", "None", Noun, "no Census data for this place"), tile("s-local", "None", "Densest block group", "no Census data for this place"))))
+    }
+    cells <- census$cells; dk <- if (hu) cells$hdens_km else cells$dens_km; cells$dens <- dk * uf()^2           # per displayed square unit
+    k <- findInterval(cells$dens, sc$breaks[-1])                                                              # 0 below the first break up to 5 at or past the last
+    cells$cls <- factor(ifelse((if (hu) cells$hu else cells$pop) <= 0, 1L, 2L + pmin(k, 5L)), levels = seq_along(lv), labels = lv)
+    tot <- if (hu) census$hu else census$pop; tot_txt <- fmt_n(if (tot >= 1000) signif(tot, 3) else round(tot))
+    mx <- (if (hu) census$max_hdens_km else census$max_dens_km) * uf()^2
+    return(list(view = view, scope = scope, noun = paste0("shaded by ", what, " per square kilometer, from the 2020 Census"), cells = cells, levels = lv, has_census = TRUE,
+      total = tot, max_dens = mx, unit_area = sc$area, what = what,
+      subtitle = as.character(glue("About {tot_txt} {if (hu) 'housing units stood' else 'people lived'} {where} at the 2020 Census. The most crowded block group has {fmt_n(round(mx))} {what} per {sc$area}.")),
+      caption = paste0(credit, "; each of the ", census$n_bg, " block groups is shaded by its ", what, " per ", sc$area, " of land, and the total counts the share of each block group inside the map, ",
+                       "so it is an estimate; the classes are the same for every place, so maps can be compared"),
+      tiles = list(t_total, tile("s-through", paste0("about ", tot_txt), Noun, "2020 Census, inside the map"),
+                   tile("s-local", paste0(fmt_n(round(mx)), " per ", if (identical(ulab(), "mi")) "mi" else "km", "²"), "Densest block group", paste0("of ", census$n_bg, " block groups")))))
+  }
+
   segs <- segments_of(lines)
   hx <- hex_density(segs, radius_m, center_m, shape, across = if (isTRUE(fine)) relief_across else 11)
   cells <- hx$cells; d <- cells$dens * uf()                 # miles per square mile is 1.609 times kilometers per square kilometer
@@ -1498,7 +1579,7 @@ map_furniture <- function(center_m, radius_m, pal) {
        annotate("polygon", x = c(ax, ax + hw, ax, ax - hw), y = c(ay + 0.16 * R, ay, ay + 0.055 * R, ay), fill = pal$ink, color = pal$ink, linewidth = 0.2),
        annotate("text", x = ax, y = ay + 0.185 * R, label = "N", hjust = 0.5, vjust = 0, size = label_mm * 1.05, color = pal$ink, family = body_font))
 }
-make_map <- function(lines, place, lon, lat, radius_m, crs_m, label_roads = TRUE, style = "classic", view = "hierarchy", show_local = TRUE, shape = NULL, inside = NULL, detail = "all", center_txt = NULL, units = "km", paths = NULL, note = NULL, relief = FALSE, lights = NULL, nature = NULL) {
+make_map <- function(lines, place, lon, lat, radius_m, crs_m, label_roads = TRUE, style = "classic", view = "hierarchy", show_local = TRUE, shape = NULL, inside = NULL, detail = "all", center_txt = NULL, units = "km", paths = NULL, note = NULL, relief = FALSE, lights = NULL, nature = NULL, census = NULL) {
   old_u <- unit_env$u; unit_env$u <- as_unit(units); on.exit(unit_env$u <- old_u, add = TRUE)
   pal <- get_style(style); view <- get_view(view)
   if (view == "lights") pal <- night_palette(pal, style)
@@ -1506,7 +1587,7 @@ make_map <- function(lines, place, lon, lat, radius_m, crs_m, label_roads = TRUE
   circle <- if (is.null(shape)) st_buffer(center_m, radius_m) else shape
   # Relief: the street-density hexagons are raised into spikes that stand up from the same flat map.
   rel <- identical(view, "density") && isTRUE(relief)
-  vd <- view_data(view, lines, radius_m, center_m, shape, detail, center_txt, unit_env$u, paths = paths, fine = rel, lights = lights, nature = nature)
+  vd <- view_data(view, lines, radius_m, center_m, shape, detail, center_txt, unit_env$u, paths = paths, fine = rel, lights = lights, nature = nature, census = census)
   hide_local <- view == "hierarchy" && !isTRUE(show_local)   # only the drawing changes; the numbers and legend totals still count every street
   drawn <- if (hide_local) filter(lines, role != roles$role[5]) else lines
   legend_theme <- theme(legend.position = "bottom", legend.text = element_text(size = 11, color = pal$muted, margin = margin(l = 3, r = 6)),
@@ -1650,6 +1731,28 @@ make_map <- function(lines, place, lon, lat, radius_m, crs_m, label_roads = TRUE
       geom_sf(data = keys, aes(fill = cls), alpha = 0, color = NA, show.legend = TRUE) +
       scale_fill_manual(values = setNames(c(nt$water, nt$wood, nt$park), lv), labels = leg, limits = if (length(present) > 0) present else lv, name = NULL, drop = FALSE) +
       guides(fill = guide_legend(nrow = 1, override.aes = list(colour = pal$ring, linewidth = 0.25, alpha = 1))) + frame
+  } else if (view %in% c("census", "homes")) {
+    rl <- roles$role; lw <- roles$lw
+    street_layers <- lapply(seq_along(rl), function(i) {
+      d <- filter(lines, role == rl[i]); if (nrow(d) == 0) return(NULL)
+      geom_sf(data = d, color = pal$ink, alpha = 0.42, linewidth = lw[i] * 0.32, lineend = "round")
+    })
+    if (!isTRUE(vd$has_census)) {
+      map_plot <- base + rev(street_layers) + frame
+    } else {
+      lv <- vd$levels
+      fills <- setNames(c(mix_color(pal$ring, pal$plate, 0.45), pal$dens), lv)
+      cxy <- as.numeric(st_coordinates(center_m))      # a class with no block groups gets no legend key from ggplot, so each class carries an invisible one-meter square
+      keys <- st_sf(cls = factor(lv, levels = lv), geometry = st_sfc(rep(list(st_polygon(list(cbind(cxy[1] + c(0, 1, 1, 0, 0), cxy[2] + c(0, 0, 1, 1, 0))))), length(lv)), crs = st_crs(center_m)))
+      map_plot <- base + geom_sf(data = vd$cells, aes(fill = cls), color = pal$plate, linewidth = 0.3) + rev(street_layers) +
+        geom_sf(data = keys, aes(fill = cls), alpha = 0, color = NA, show.legend = TRUE) +
+        scale_fill_manual(values = fills, limits = lv, name = paste0(vd$what, " per ", vd$unit_area), drop = FALSE) +
+        guides(fill = guide_legend(nrow = 2, byrow = TRUE, title.position = "top", title.hjust = 0.5,
+                                   override.aes = list(colour = pal$ring, linewidth = 0.25, alpha = 1))) + frame +
+        theme(legend.key.width = unit(0.9, "cm"), legend.key.height = unit(0.5, "cm"), legend.key.spacing.x = unit(10, "pt"),
+              legend.margin = margin(18, 0, 10, 0), legend.title = element_text(size = 11, color = pal$muted, margin = margin(0, 0, 6, 0)),
+              legend.text = element_text(size = 10.5, color = pal$muted, margin = margin(l = 4)))
+    }
   } else if (view == "blocks") {
     lv <- vd$levels
     cols <- setNames(c(pal$dens[6], pal$dens[5], pal$dens[3], pal$dens[2]), lv); lw <- setNames(c(0.85, 0.7, 0.6, 0.55), lv)
@@ -2441,7 +2544,7 @@ help_page <- function() {
       navset_pill_list(id = "help_topic", widths = c(3, 9), well = FALSE,
         help_topic("Getting started",
           help_section("What can Overmaps do?", open = TRUE,
-            p("It turns the street network of a place into a map you can read and print. You can see which roads carry through traffic, how fast they allow you to go, which way they point, how long the blocks are, and where the parks, water, and street lights sit."),
+            p("It turns the street network of a place into a map you can read and print. You can see which roads carry through traffic, how fast they allow you to go, which way they point, how long the blocks are, where the parks, water, and street lights sit, and, for places in the United States, where people live."),
             p("The header has three pages. Home is where the app opens. Current maps draws any place today. Historical maps draws the roads and cities of the ancient world. Both map pages work the same way, so you can move between them at any time.")),
           help_section("How do I draw my first map?",
             tags$ol(
@@ -2464,7 +2567,11 @@ help_page <- function() {
               tags$li(tags$strong("Street density."), " Street length per square kilometer in hexagons. A switch raises the hexagons into spikes."),
               tags$li(tags$strong("Bike & walk."), " Sidewalks, bike lanes, and paths, as tagged in OpenStreetMap."),
               tags$li(tags$strong("Street lights."), " Lit streets and mapped lamps glowing against the night."),
-              tags$li(tags$strong("Nature & water."), " Parks, woods, rivers, lakes, and the sea under the streets."))),
+              tags$li(tags$strong("Nature & water."), " Parks, woods, rivers, lakes, and the sea under the streets."),
+              tags$li(tags$strong("Population."), " Residents per square kilometer from the 2020 Census, shaded by block group under the streets. It covers the United States and its territories only."),
+              tags$li(tags$strong("Housing."), " Homes per square kilometer from the 2020 Census, shaded the same way."))),
+          help_section("Where do the Population and Housing maps get their numbers?",
+            p("From the 2020 Census, through the U.S. Census Bureau's TIGERweb service, which is asked for the block groups around your map when you choose Population or Housing. A block group holds roughly 600 to 3,000 people, and each one is shaded evenly, so the map shows how a place is laid out and not exactly where each person lives. Housing counts every housing unit, occupied or vacant. The total counts the share of every block group that falls inside the map, so it is an estimate. For a place outside the United States, the map says that no Census data is available.")),
           help_section("What are the three looks?",
             p("Classic is warm paper with ink colors. Dusk is a dark navy sheet with bright roads. Mono is plain black and white and prints well on any printer. The look changes colors only, never the data.")),
           help_section("Why does a place look thin or empty?",
@@ -2486,7 +2593,9 @@ help_page <- function() {
           help_section("Why does an ancient city's circle end where it does?",
             p("The starting radius is fitted to the mapped streets, with a small margin, so the circle ends just past the edge of the remains. Use the Radius slider to see more or less. A site with very little mapped keeps the radius listed for it.")),
           help_section("Why is Street lights missing for some ancient sites?",
-            p("It is offered only where OpenStreetMap shows at least ten street lamps or lit streets around the site. The lights are modern lighting near the site, not ancient. Nature & water is offered for every site."))),
+            p("It is offered only where OpenStreetMap shows at least ten street lamps or lit streets around the site. The lights are modern lighting near the site, not ancient. Nature & water is offered for every site.")),
+          help_section("Why do only some ancient sites show a population estimate?",
+            p(paste0("A site shows one only where scholars have published an estimate that can be cited, so ", nrow(ancient_estimates), " of the ", nrow(ancient_sites), " sites do. The figure is an estimate, not a count, and studies of the same site often disagree widely, so each is shown with the period it describes and its source. For Angkor the figure covers the whole Greater Angkor Region and not the walled city alone. The full references are in the data folder.")))),
         help_topic("Downloads and sharing",
           help_section("Can I use a dark page?",
             p("Yes. The Dark button at the right end of the header switches the whole app to a dark page, and the same button then reads Light. The first time you visit, the app follows your computer's setting, and after that it remembers your last choice in this browser. The page theme changes the app only. The Classic, Dusk, and Mono looks still decide the colors of a map, and a saved file never depends on the page theme, only on the look and the file's Color vision menu.")),
@@ -2502,7 +2611,7 @@ help_page <- function() {
             p("Yes. Open Compare places near the bottom of the Current maps sidebar, type up to three other places separated by semicolons, or add a well-known planned street grid. The places are drawn side by side at the same radius with the numbers underneath."))),
         help_topic("Privacy and problems",
           help_section("Where does my data go?", open = TRUE,
-            p("Only what a lookup needs. The text you type in the place box goes to Photon, an OpenStreetMap search service, as you type, unless you turn suggestions off in Settings. A U.S. address with a city and state also goes to the Census Bureau. The streets come from OpenStreetMap through the Overpass service. Nothing is stored on a server, and there are no accounts."),
+            p("Only what a lookup needs. The text you type in the place box goes to Photon, an OpenStreetMap search service, as you type, unless you turn suggestions off in Settings. A U.S. address with a city and state also goes to the Census Bureau. The streets come from OpenStreetMap through the Overpass service. The Population and Housing maps ask the Census Bureau for the block groups inside the map, which sends only the map's coordinates and not the text you typed. Nothing is stored on a server, and there are no accounts."),
             p("Remember my settings keeps your choices in this browser only. Forget saved settings removes them.")),
           help_section("The map says no streets were found, or it is slow.",
             p("The free Overpass servers are sometimes busy, so the app tries several in turn. Wait a minute and press Draw map again. A smaller radius is faster, and so is leaving Include every street off.")),
@@ -2513,6 +2622,7 @@ help_page <- function() {
         help_topic("Sources and credits",
           tags$ul(class = "credit-list",
             tags$li(tags$strong("Current maps and ancient city streets. "), "Map data © ", ext("https://www.openstreetmap.org/copyright", "OpenStreetMap contributors"), " (ODbL). Places are found with Photon, and U.S. addresses with the U.S. Census Bureau geocoder."),
+            tags$li(tags$strong("Population and Housing. "), "Residents and housing units by block group from the 2020 Census, U.S. Census Bureau, through its TIGERweb service. Public data of the U.S. government."),
             tags$li(tags$strong("Roman roads. "), ext("https://itiner-e.org", "Itiner-e"), " (CC BY 4.0). Travel times from Tristan Hotham, ", tags$em("By Road and by Sea"), " (CC BY 4.0). Simplified for display."),
             tags$li(tags$strong("Egyptian desert routes. "), "Manière, Crépy and Redon (2020), Desert Networks project, CNRS, ", ext("https://doi.org/10.5281/zenodo.4291876", "doi:10.5281/zenodo.4291876"), " (CC BY 4.0). Simplified for display."),
             tags$li(tags$strong("Icons. "), "The two icons on Home are from the Noto Emoji set by Google (Apache 2.0), found through ", ext("https://iconify.design", "Iconify"), "."),
@@ -3031,6 +3141,23 @@ ancient_sites <- tibble::tribble(
   "lalibela", "Lalibela, Ethiopia", "East Africa", 12.0317, 39.0473, 0.5, "Churches cut downward out of solid rock in the 12th century.",
   "kilwa", "Kilwa Kisiwani, Tanzania", "East Africa", -8.9581, 39.5160, 0.5, "A Swahili island port that grew rich on gold and trade across the Indian Ocean."
 )
+# Published population estimates for the few sites where scholars have made one. These are estimates, not counts, and they differ a great deal between studies,
+# so each is shown as the authors gave it, with the period it describes and where it came from. A site with no entry has no estimate here, because only a
+# citable published figure is used. The full references are in data/README.md.
+ancient_estimates <- tibble::tribble(
+  ~id,           ~est,                                                                                               ~when,                                       ~who,
+  "ostia",       "between 22,000 and 58,000 people (published estimates range this widely)",                         "in the 2nd century CE",                    "Storey (1997), Packer (1967), Calza (1941) and Meiggs (1973)",
+  "knossos",     "about 25,000 people",                                                                              "in the Neopalatial period, the Late Bronze Age", "Cutler and Whitelaw (2019)",
+  "teotihuacan", "about 100,000 people (earlier estimates run from 75,000 to over 200,000)",                         "in the Xolalpan and Metepec phases, about 350 to 650 CE", "Smith and others (2019)",
+  "angkor_thom", "700,000 to 900,000 people across the whole Greater Angkor Region, about 3,000 square kilometers, not the walled city alone", "at its height in the 13th century CE", "Klassen and others (2021)",
+  "great_zim",   "no more than 10,000 people (an older estimate is 18,000)",                                         "at its peak",                              "Chirikure and others (2017); the older figure is Huffman's, as reported by Pikirayi (2013)"
+)
+city_estimate <- function(id) {
+  r <- ancient_estimates[ancient_estimates$id == as.character(id %||% "")[1], ]
+  if (nrow(r) != 1) NULL else as.list(r)
+}
+city_estimate_text <- function(e) paste0("Estimated population ", e$when, ": ", e$est, ". Source: ", e$who, ". An estimate, not a count.")
+
 ancient_site_choices <- lapply(split(ancient_sites, factor(ancient_sites$civ, levels = unique(ancient_sites$civ))), function(d) setNames(d$id, d$name))
 # The starting radius for a site is fitted to what is mapped there: the distance that holds almost all of the saved streets, plus a small margin, so the circle
 # ends just past the edge of the remains instead of at a guess. A few stray paths far out would stretch the circle, so the farthest 2% of points are ignored.
@@ -3109,14 +3236,20 @@ city_alt <- function(d) {
   what <- switch(d$view, nature = ", with the water, woods, and parks around them", lights = ", showing the street lamps and lit streets", paste0(", colored by ", tolower(city_views[[d$view]])))
   paste0("Map of the mapped streets of ", d$site$name, what, ". ", city_coverage(d$lines)$text)
 }
+# The sentence added to a drawing's caption: what the streets are, the published population estimate when the site has one, and any note for the map type.
+city_note <- function(s, view) {
+  e <- city_estimate(s$id)
+  paste0("the streets and paths shown are the site as it is today, drawn by OpenStreetMap volunteers from what has been excavated, ",
+         "so they show the surviving remains and not a reconstruction of the whole ancient city",
+         if (!is.null(e)) paste0("; estimated population ", e$when, ": ", e$est, " (", e$who, "), an estimate and not a count") else "",
+         if (identical(view, "nature")) "; water and shores are as mapped today, and rivers and coasts have moved since ancient times"
+         else if (identical(view, "lights")) "; the lamps and lit streets are modern lighting around the site, not ancient" else "")
+}
 city_map <- function(d, style = "classic") {
   s <- d$site
   make_map(d$lines, s$name, s$lon, s$lat, d$radius_m %||% round(s$radius_km * 1000), d$crs, label_roads = FALSE, style = style, view = d$view, show_local = TRUE, detail = "all",
            units = d$units %||% "km", relief = isTRUE(d$relief) && identical(d$view, "density"), lights = d$lights, nature = d$nature,
-           note = paste0("the streets and paths shown are the site as it is today, drawn by OpenStreetMap volunteers from what has been excavated, ",
-                         "so they show the surviving remains and not a reconstruction of the whole ancient city",
-                         if (identical(d$view, "nature")) "; water and shores are as mapped today, and rivers and coasts have moved since ancient times"
-                         else if (identical(d$view, "lights")) "; the lamps and lit streets are modern lighting around the site, not ancient" else ""))
+           note = city_note(s, d$view))
 }
 
 # A snapshot of the OpenStreetMap streets at each site, built once by data-raw/fetch_ancient_cities.R and kept in data/ancient_cities.rds.
@@ -3266,7 +3399,8 @@ compare_build <- function(g, query_b, view = "hierarchy", style = "classic", uni
     pth <- if (identical(get_view(view), "active")) load_paths(lon, lat, radius_m, crs_m) else NULL
     lgt <- if (identical(get_view(view), "lights")) load_lights(lon, lat, radius_m, crs_m) else NULL
     nat <- if (identical(get_view(view), "nature")) load_nature(lon, lat, radius_m, crs_m) else NULL
-    pl <- make_map(lines, place, lon, lat, radius_m, crs_m, label_roads = label_roads, style = style, view = view, show_local = show_local, detail = detail, center_txt = center_txt, units = units, paths = pth, lights = lgt, nature = nat)
+    cen <- if (get_view(view) %in% c("census", "homes")) load_census(lon, lat, radius_m, crs_m) else NULL
+    pl <- make_map(lines, place, lon, lat, radius_m, crs_m, label_roads = label_roads, style = style, view = view, show_local = show_local, detail = detail, center_txt = center_txt, units = units, paths = pth, lights = lgt, nature = nat, census = cen)
     center_m <- center_of(lon, lat, crs_m); clip <- st_buffer(center_m, radius_m * 0.988)
     net <- network_stats(lines, segments_of(lines), clip, as.numeric(st_area(clip)) / 1e6, radius_m * 0.03)
     vh <- view_data("hierarchy", lines, radius_m, center_m, NULL, detail, NULL, units); vdir <- view_data("direction", lines, radius_m, center_m, NULL, detail, NULL, units)
@@ -3819,18 +3953,31 @@ server <- function(input, output, session) {
     nature_cache$value
   })
   active_nature <- function() if (identical(get_view(input$view), "nature")) nature_data() else NULL
+  # Population needs the Census Bureau's block groups, fetched only when that map type is chosen. A failed request is not kept, so choosing the map again tries again.
+  census_cache <- new.env(); census_cache$key <- NULL; census_cache$value <- NULL
+  census_data <- reactive({
+    g <- geo(); req(get_view(input$view) %in% c("census", "homes"))
+    key <- paste(g$lon, g$lat, g$radius_m, if (is.null(g$shape)) "circle" else round(as.numeric(st_area(g$shape))))
+    if (!identical(key, census_cache$key)) {
+      val <- withProgress(message = "Loading Census population", value = 0.5, load_census(g$lon, g$lat, g$radius_m, g$crs_m, g$shape))
+      if (isTRUE(val$failed)) return(val)
+      census_cache$key <- key; census_cache$value <- val
+    }
+    census_cache$value
+  })
+  active_census <- function() if (get_view(input$view) %in% c("census", "homes")) census_data() else NULL
   build_for <- function(style) {
-    g <- geo(); pth <- active_paths(); lgt <- active_lights(); nat <- active_nature()
+    g <- geo(); pth <- active_paths(); lgt <- active_lights(); nat <- active_nature(); cen <- active_census()
     make_map(g$lines, g$place, g$lon, g$lat, g$radius_m, g$crs_m, label_roads = isTRUE(input$labels), style = style, view = input$view, units = as_unit(input$units),
              show_local = isTRUE(input$locals), shape = g$shape, inside = g$inside, detail = g$detail, center_txt = g$center_txt, paths = pth,
-             relief = isTRUE(input$relief), lights = lgt, nature = nat)
+             relief = isTRUE(input$relief), lights = lgt, nature = nat, census = cen)
   }
   built <- reactive(build_for(sid()))
   dl_style <- reactive(style_key(input$style, input$dl_cvd %||% "standard"))      # the file's own color vision, Standard unless the person changes it
   # Numbers for the tiles and the alt text; recomputed when the map type changes, never re-downloaded.
   vdata <- reactive({
     g <- geo()
-    view_data(input$view, g$lines, g$radius_m, center_of(g$lon, g$lat, g$crs_m), g$shape, g$detail, g$center_txt, as_unit(input$units), g$net, paths = active_paths(), fine = isTRUE(input$relief) && identical(input$view, "density"), lights = active_lights(), nature = active_nature())
+    view_data(input$view, g$lines, g$radius_m, center_of(g$lon, g$lat, g$crs_m), g$shape, g$detail, g$center_txt, as_unit(input$units), g$net, paths = active_paths(), fine = isTRUE(input$relief) && identical(input$view, "density"), lights = active_lights(), nature = active_nature(), census = active_census())
   })
 
   output$has_map <- renderText(if (tryCatch({ geo(); TRUE }, error = function(e) FALSE)) "yes" else "no")   # drives the Download section
@@ -4020,7 +4167,10 @@ server <- function(input, output, session) {
   c_data <- reactive(c_state())
   c_ready <- reactive({ d <- c_data(); if (is.null(d) || is.null(d$lines)) NULL else d })
   output$c_has_map <- renderText(if (is.null(c_ready())) "no" else "yes"); outputOptions(output, "c_has_map", suspendWhenHidden = FALSE)
-  output$c_note <- renderUI({ s <- ancient_site(input$c_site); if (is.null(s)) return(NULL); p(class = "fine", paste0(s$civ, ". ", s$note)) })
+  output$c_note <- renderUI({
+    s <- ancient_site(input$c_site); if (is.null(s)) return(NULL); e <- city_estimate(s$id)
+    tagList(p(class = "fine", paste0(s$civ, ". ", s$note)), if (!is.null(e)) p(class = "fine", city_estimate_text(e)))
+  })
   output$c_status <- renderUI({
     d <- c_data()
     if (is.null(d)) return(div(class = "fine", role = "status", "Choose a city and press Draw map. Streets not already saved with the app are downloaded from OpenStreetMap, which can take a little while."))

@@ -2,6 +2,8 @@
 
 ## 1.1.0
 
+- Population and Housing are two new map types for places in the United States. They shade the 2020 Census block groups by residents or housing units per square kilometer (or square mile), on fixed classes so any two places compare fairly, with the streets drawn over the shading and a legend of seven classes. The Census Bureau's TIGERweb service is asked once per place, only when one of these maps is chosen, and receives only the map's bounding box. Outside the United States, or when the service does not answer, the map draws the streets alone and says so. Compare places works in both.
+- Ancient cities now show a published population estimate for the five sites that have a citable one (Ostia Antica, Knossos, Teotihuacan, Angkor, and Great Zimbabwe), in the note beside the map and in the map caption, always as an estimate with its period and source. The references are in data/README.md.
 - Expand no longer disappears from the header on Egyptian desert and Ancient cities. The tabs that switch between the three sets of historical maps were being read as a change of page.
 - When a server's quick status check fails, the next pass goes straight to the real request instead of failing on the same check again, and the log in the console now shows the whole reason a server failed rather than the first 120 characters.
 - The dark page dims the Home map and darkens the Home cards, the Help panel, the Help topic tabs, and the place card that appears after a place is found. The page theme never changes a map's look.
